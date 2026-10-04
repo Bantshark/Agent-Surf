@@ -90,6 +90,20 @@ pointed at a local fake Messages API. `tests/conftest.py` lets a `pytest`
 installed in its own virtualenv (`uv tool`, `pipx`) find the packages from
 `requirements.txt` installed for `python3`.
 
+`tests/test_browser.py::test_cdp_session_and_dom_extraction` and
+`tests/test_e2e.py` start a browser with a debugging port. They use Playwright's
+bundled Chromium unless `AGENT_SURF_TEST_CHROME` points to an existing browser
+executable. Set it where the bundled Chromium will not launch (for example
+`WinError 14001` on some Windows machines):
+
+```
+# PowerShell, Brave
+$env:AGENT_SURF_TEST_CHROME = "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+# PowerShell, Edge
+$env:AGENT_SURF_TEST_CHROME = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+pytest -q
+```
+
 `tests/make_fixtures.py` regenerates the fixtures. `tests/test_scrub_guard.py`
 fails if any fixture contains cookies, auth headers or token-shaped headers.
 

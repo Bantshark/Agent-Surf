@@ -1,3 +1,4 @@
+import os
 import socket
 import subprocess
 import sys
@@ -111,11 +112,28 @@ def test_connect_failure_is_clear():
 
 
 def _chromium_path():
+    """Browser for the CDP tests. AGENT_SURF_TEST_CHROME (an existing file, e.g.
+    Brave or Edge) overrides Playwright's bundled Chromium, which may not launch
+    on some Windows machines (WinError 14001)."""
+    override = os.environ.get("AGENT_SURF_TEST_CHROME")
+    if override and os.path.isfile(override):
+        return override
     # In a child process: a bare start/stop of Playwright prints asyncio noise.
     code = "from playwright.sync_api import sync_playwright\n" \
            "with sync_playwright() as p: print(p.chromium.executable_path)"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     return out.stdout.strip()
+
+
+def test_test_chrome_override(monkeypatch, tmp_path):
+    fake = tmp_path / "brave.exe"
+    fake.write_text("")
+    monkeypatch.setenv("AGENT_SURF_TEST_CHROME", str(fake))
+    assert _chromium_path() == str(fake)
+    monkeypatch.setenv("AGENT_SURF_TEST_CHROME", str(tmp_path / "missing.exe"))
+    assert _chromium_path() != str(tmp_path / "missing.exe") and os.path.isfile(_chromium_path())
+    monkeypatch.delenv("AGENT_SURF_TEST_CHROME")
+    assert os.path.isfile(_chromium_path())
 
 
 def test_cdp_session_and_dom_extraction(tmp_path):
