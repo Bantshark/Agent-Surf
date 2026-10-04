@@ -165,6 +165,10 @@ COMMANDS = {"chrome": cmd_chrome, "learn": cmd_learn, "run": cmd_run, "maps": cm
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows redirects stdout as cp1252; items routinely contain emoji.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args(argv)
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="agent-surf: %(message)s",
                         force=True)

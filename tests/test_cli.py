@@ -1,6 +1,8 @@
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -132,3 +134,44 @@ def test_scrub(home, tmp_path, capsys):
     assert SECRET not in dst.read_text()
     assert SECRET not in captured.out + captured.err
     assert "removed 8 header(s), 2 cookie(s)" in captured.err
+
+
+EMOJI_SCRIPT = r'''
+import sys
+import yt_dlp
+from agent_surf import cli
+
+
+class FakeYDL:
+    def __init__(self, opts):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def extract_info(self, target, download):
+        return {"id": "vid00000001", "title": "Synthetic \U0001f3ad show été",
+                "webpage_url": "https://www.youtube.com/watch?v=vid00000001"}
+
+    @staticmethod
+    def sanitize_info(info):
+        return info
+
+
+yt_dlp.YoutubeDL = FakeYDL
+sys.exit(cli.main(sys.argv[1:]))
+'''
+
+
+def test_cli_prints_non_ascii_on_cp1252_stdout(tmp_path):
+    """Windows redirects stdout as cp1252; --json output with an emoji must not crash."""
+    env = dict(os.environ, PYTHONIOENCODING="cp1252", AGENT_SURF_HOME=str(tmp_path / "home"))
+    out = subprocess.run(
+        [sys.executable, "-c", EMOJI_SCRIPT, "youtube", "https://youtu.be/vid00000001", "--json"],
+        capture_output=True, env=env, cwd=Path(__file__).parent.parent)
+    assert out.returncode == 0, out.stderr.decode("utf-8", "replace")
+    items = json.loads(out.stdout.decode("utf-8"))
+    assert items[0]["title"] == "Synthetic \U0001f3ad show été"
