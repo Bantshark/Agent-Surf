@@ -60,16 +60,35 @@ Environment:
 | `ANTHROPIC_API_KEY` | | `learn` and self-heal only |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | | CAPTCHA ping; otherwise stderr |
 
+### Maps and clicks
+
+A map may carry an optional `"click"` list of up to 5 CSS selectors for
+"Show more" / "Load more" controls. The runner clicks a matching element only
+if it is visible, enabled, outside any form or dialog, not a submit button or
+real link, and its short label matches an expand word (show, see, view, load,
+read, expand, more, older) with no deny word (like, follow, reply, post, share,
+sign, less, ...). A click that changes the URL turns clicking off for the rest
+of the run.
+
+### YouTube
+
+Media is never downloaded, so the player JavaScript is skipped and a video
+with no playable formats is not an error. Metadata, subtitles and comments
+need no JS-challenge solver: no extra package and no code fetched at runtime.
+
 ### Tests
 
-Tests are offline. They use synthetic HAR fixtures for `https://feed.test`
-served through Playwright `route_from_har`. If your `pytest` lives in its own
-virtualenv (for example installed with `uv tool` or `pipx`), point it at the
-packages from `requirements.txt`:
+```
+pytest -q
+```
 
-```
-PYTHONPATH="$(python3 -c 'import playwright, os; print(os.path.dirname(os.path.dirname(playwright.__file__)))')" pytest -q
-```
+Tests are offline. Most use synthetic HAR fixtures for `https://feed.test`
+served through Playwright `route_from_har`. `tests/test_e2e.py` drives the real
+CLI against a separately started Chromium over CDP, a local HTTPS server for
+`feed.test` (throwaway cert from `openssl`), and the real `anthropic` SDK
+pointed at a local fake Messages API. `tests/conftest.py` lets a `pytest`
+installed in its own virtualenv (`uv tool`, `pipx`) find the packages from
+`requirements.txt` installed for `python3`.
 
 `tests/make_fixtures.py` regenerates the fixtures. `tests/test_scrub_guard.py`
 fails if any fixture contains cookies, auth headers or token-shaped headers.

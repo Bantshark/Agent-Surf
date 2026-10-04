@@ -233,3 +233,37 @@ Complete each unit with its tests before moving on.
 ## Out of scope for v1
 MCP server, Supabase, scheduling, multi-account rotation, proxies, any
 anti-detection or CAPTCHA-solving technique.
+
+## Decisions after the v1 build
+Gaps reported during the build, decided by the owner and implemented:
+
+1. **Tests and the isolated pytest.** The cloud image's `pytest` runs in its own
+   uv venv. `tests/conftest.py` appends the system `python3` site-packages to
+   `sys.path` (and `PYTHONPATH` for subprocesses) when `playwright` is not
+   importable. Nothing is installed. `pytest.ini` sets `testpaths` and
+   `pythonpath = .`.
+2. **Clicks.** Maps gain an optional top-level `"click"`: 1..5 CSS selectors for
+   "show more" controls. Code, not the model, decides what is clicked
+   (`browser.safe_to_click`): visible, enabled, not editable, not in a form or
+   dialog, not submit/reset/file, not a link with a real href, label <= 40
+   chars matching an expand allowlist and no denylist word. Clicks happen after
+   the first load and after each scroll; a click that changes the URL disables
+   clicks for the run; the domain lock applies after every click.
+3. **YouTube without a JS solver.** `player_skip: ["js"]` and
+   `ignore_no_formats_error: True`, since media is never downloaded. No
+   `yt-dlp-ejs`, never `remote_components`. Node stays the configured runtime.
+4. **Scrubbing request bodies.** `postData` params, JSON keys and form fields
+   matching `(?i)token|auth|session|csrf` are redacted; an unparseable body that
+   mentions such a name is replaced with `REDACTED`. The guard checks body params.
+5. **Kept as built:** URL templates in `sites.py` (reddit `post` =
+   `/comments/{handle}/`, linkedin `profile` = `/in/{handle}/recent-activity/all/`);
+   `[*]` also fans out over dict values; unknown nested keys rejected;
+   site/page_type names `[a-z0-9_]+`; fingerprint collapses repeated siblings;
+   learner sends the 30 largest JSON responses and owns identity/provenance
+   fields; YouTube targets are https YouTube URLs or `ytsearchN:` (N 1..1000);
+   exit codes 3 (challenge timeout) and 4 (map broken, no API key); redirect
+   URLs are scrubbed like query strings.
+6. **End-to-end test.** `tests/test_e2e.py` runs learn → run → delta →
+   self-heal through the CLI with a CDP-attached Chromium, a local HTTPS
+   `feed.test` and the real `anthropic` SDK against a local fake API.
+
