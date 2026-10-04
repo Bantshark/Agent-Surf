@@ -1,0 +1,120 @@
+"""Site registry: allowed domains, page types and URL templates.
+
+Navigation is only ever to a URL built from a template here, and any URL the
+browser ends up on must stay inside the site's domains (subdomains included).
+"""
+
+from __future__ import annotations
+
+import string
+from dataclasses import dataclass, field
+from urllib.parse import quote, urlsplit
+
+
+class DomainRefused(ValueError):
+    pass
+
+
+class UnknownSite(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Site:
+    name: str
+    domains: tuple[str, ...]
+    page_types: dict[str, str] = field(default_factory=dict)  # page_type -> URL template
+
+
+SITES: dict[str, Site] = {}
+
+
+def register_site(site: Site) -> None:
+    for page_type, template in site.page_types.items():
+        if not is_allowed_url(site, template.replace("{query}", "q").replace("{handle}", "h")):
+            raise DomainRefused(f"{site.name}.{page_type}: template is outside {site.domains}")
+    SITES[site.name] = site
+
+
+def unregister_site(name: str) -> None:
+    SITES.pop(name, None)
+
+
+def get_site(name: str) -> Site:
+    try:
+        return SITES[name]
+    except KeyError:
+        raise UnknownSite(f"unknown site {name!r}; known: {', '.join(sorted(SITES))}") from None
+
+
+def placeholders(template: str) -> set[str]:
+    return {f for _, f, _, _ in string.Formatter().parse(template) if f}
+
+
+def build_url(site_name: str, page_type: str, *, query: str | None = None,
+              handle: str | None = None) -> str:
+    site = get_site(site_name)
+    if page_type not in site.page_types:
+        raise UnknownSite(f"{site_name} has no page type {page_type!r}; "
+                          f"known: {', '.join(sorted(site.page_types))}")
+    template = site.page_types[page_type]
+    needed = placeholders(template)
+    given = {k: v for k, v in (("query", query), ("handle", handle)) if v is not None}
+    for k in sorted(needed - given.keys()):
+        raise ValueError(f"{site_name} {page_type} needs --{k}")
+    for k in sorted(given.keys() - needed):
+        raise ValueError(f"{site_name} {page_type} does not take --{k}")
+    values = {}
+    for k, v in given.items():
+        if not v.strip():
+            raise ValueError(f"--{k} is empty")
+        values[k] = quote(v.strip(), safe="")
+    url = template.format(**values)
+    check_url(site, url)
+    return url
+
+
+def is_allowed_url(site: Site, url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower().rstrip(".")
+    if parts.scheme != "https" or not host:
+        return False
+    return any(host == d or host.endswith("." + d) for d in site.domains)
+
+
+def check_url(site: Site | str, url: str) -> None:
+    if isinstance(site, str):
+        site = get_site(site)
+    if not is_allowed_url(site, url):
+        raise DomainRefused(f"refusing to navigate outside {', '.join(site.domains)}: {url}")
+
+
+for _site in (
+    Site("x", ("x.com",), {
+        "home": "https://x.com/home",
+        "search": "https://x.com/search?q={query}&f=live",
+        "profile": "https://x.com/{handle}",
+    }),
+    Site("reddit", ("reddit.com",), {
+        "subreddit": "https://www.reddit.com/r/{handle}/new/",
+        "post": "https://www.reddit.com/comments/{handle}/",
+        "search": "https://www.reddit.com/search/?q={query}&sort=new",
+    }),
+    Site("instagram", ("instagram.com",), {
+        "profile": "https://www.instagram.com/{handle}/",
+        "feed": "https://www.instagram.com/",
+    }),
+    Site("facebook", ("facebook.com",), {
+        "page": "https://www.facebook.com/{handle}",
+        "feed": "https://www.facebook.com/",
+    }),
+    Site("linkedin", ("linkedin.com",), {
+        "profile": "https://www.linkedin.com/in/{handle}/recent-activity/all/",
+        "feed": "https://www.linkedin.com/feed/",
+        "jobs": "https://www.linkedin.com/jobs/search/?keywords={query}",
+    }),
+):
+    register_site(_site)
