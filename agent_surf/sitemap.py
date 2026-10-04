@@ -313,7 +313,20 @@ def items_from_responses(network: dict, responses: Iterable[Any]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Fingerprint: roles and nesting of the aria snapshot, all names/text stripped.
+# Fingerprint: landmark/container roles and nesting of the aria snapshot, all
+# names/text stripped. Only structural roles count; everything else is dropped
+# and its structural descendants are lifted to the parent. Item containers are
+# leaves, so what is inside an item (media, polls, quote cards) and which items
+# happen to be loaded do not change it; moving or removing a landmark or the
+# item container role does.
+
+FINGERPRINT_PREFIX = "v2-sha256-"
+STRUCTURAL_ROLES = frozenset({
+    "banner", "navigation", "main", "complementary", "contentinfo", "region", "search",
+    "form", "feed", "list", "dialog", "alertdialog", "tablist", "tabpanel", "table", "grid",
+    "tree", "treegrid", "menu", "menubar",
+})
+ITEM_ROLES = frozenset({"article", "listitem", "row", "treeitem"})
 
 _ARIA_LINE = re.compile(r"^(\s*)-\s+(.*)$")
 _ROLE = re.compile(r"[A-Za-z][\w-]*")
@@ -349,15 +362,20 @@ def skeleton(snapshot: str) -> str:
         stack[-1]["children"].append(node)
         stack.append(node)
 
-    def ser(node: dict) -> str:
-        kids = sorted({ser(c) for c in node["children"]})
-        return node["role"] + ("(" + ",".join(kids) + ")" if kids else "")
+    def structural(node: dict) -> list[str]:
+        """Serialized structural nodes at or below ``node``."""
+        if node["role"] in ITEM_ROLES:
+            return [node["role"]]
+        kids = sorted({s for c in node["children"] for s in structural(c)})
+        if node["role"] in STRUCTURAL_ROLES or node is root:
+            return [node["role"] + ("(" + ",".join(kids) + ")" if kids else "")]
+        return kids
 
-    return ser(root)
+    return structural(root)[0]
 
 
 def fingerprint(snapshot: str) -> str:
-    return "sha256-" + hashlib.sha256(skeleton(snapshot).encode()).hexdigest()
+    return FINGERPRINT_PREFIX + hashlib.sha256(skeleton(snapshot).encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------

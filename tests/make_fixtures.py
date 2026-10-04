@@ -154,6 +154,45 @@ CHALLENGE_PAGES = {
 }
 
 
+def drift_page(posts, sidebar, *, landmarks=True):
+    """Synthetic feed page. ``posts``: list of (id, text or None)."""
+    arts = "".join(
+        f'<article data-id="{pid}">' + (f'<p class="text">{text}</p>' if text else '<p>(no text)</p>')
+        + '<button type="button">Reply</button></article>' for pid, text in posts)
+    side = "".join(
+        f'<section aria-label="{title}"><h2>{title}</h2><ul>'
+        + "".join(f"<li><a href=\"#\">{t}</a></li>" for t in entries) + "</ul>" + extra + "</section>"
+        for title, entries, extra in sidebar)
+    if landmarks:
+        body = (f'<main><section aria-label="Timeline"><h1>Feed</h1>{arts}</section></main>'
+                f'<aside>{side}</aside>')
+    else:  # redesign: no main landmark or timeline region, items straight in the body
+        body = f"<div><h1>Feed</h1>{arts}</div><aside>{side}</aside>"
+    return page("Drift Test", body)
+
+
+TRENDS = ("Trending", ["topic one", "topic two", "topic three"], "")
+DRIFT_PAGES = {
+    "/drift/base": drift_page([(f"d{i}", f"Post {i}") for i in range(1, 5)], [TRENDS]),
+    # Content-only changes: other text, more items, a different sidebar.
+    "/drift/text": drift_page([(f"d{i}", f"Something else {i}") for i in range(5, 9)], [TRENDS]),
+    "/drift/count": drift_page([(f"d{i}", f"Post {i}") for i in range(1, 10)], [TRENDS]),
+    "/drift/sidebar": drift_page(
+        [(f"d{i}", f"Post {i}") for i in range(1, 5)],
+        [("Trending", ["a", "b", "c", "d", "e", "f"], '<img alt="chart" src="data:,">'),
+         ("Who to follow", ["someone", "someone else"], '<button type="button">Show more</button>')]),
+    # Real structural change: the main landmark and timeline region are gone.
+    "/drift/redesign": drift_page([(f"d{i}", f"Post {i}") for i in range(1, 5)], [TRENDS], landmarks=False),
+    # Health drops: far fewer items; most items missing the required field.
+    "/drift/sparse": drift_page([("d1", "Post 1")], [TRENDS]),
+    "/drift/fieldless": drift_page([("d1", "Post 1")] + [(f"d{i}", None) for i in range(2, 5)], [TRENDS]),
+}
+
+
+def build_drift():
+    return har([entry(ORIGIN + path, "text/html; charset=utf-8", html) for path, html in DRIFT_PAGES.items()])
+
+
 def build_challenges():
     return har([entry(ORIGIN + path, "text/html; charset=utf-8", html) for path, html in CHALLENGE_PAGES.items()])
 
@@ -166,3 +205,4 @@ if __name__ == "__main__":
     FIXTURES.mkdir(exist_ok=True)
     write("feed.har", build_feed())
     write("challenges.har", build_challenges())
+    write("drift.har", build_drift())

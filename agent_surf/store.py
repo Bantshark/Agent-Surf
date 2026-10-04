@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS items (
 """
 
 
+# Columns added after v1. Existing databases get them via ALTER TABLE on open.
+MAPS_ADDED_COLUMNS = {
+    "dry_run_items": "INTEGER",          # items the learner's dry run found before scrolling
+    "last_fingerprint": "TEXT",          # fingerprint seen on the latest run
+    "drift_count": "INTEGER NOT NULL DEFAULT 0",  # consecutive runs whose fingerprint differed
+}
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -46,6 +54,14 @@ class Store:
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        have = {r["name"] for r in self.conn.execute("PRAGMA table_info(maps)")}
+        with self.conn:
+            for col, decl in MAPS_ADDED_COLUMNS.items():
+                if col not in have:
+                    self.conn.execute(f"ALTER TABLE maps ADD COLUMN {col} {decl}")
 
     def close(self) -> None:
         self.conn.close()
@@ -59,12 +75,31 @@ class Store:
     # maps
 
     def add_map(self, site: str, page_type: str, version: int, path: str | Path,
-                fingerprint: str | None) -> None:
+                fingerprint: str | None, dry_run_items: int | None = None) -> None:
         with self.conn:
             self.conn.execute(
-                "INSERT INTO maps (site, page_type, version, path, fingerprint, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (site, page_type, version, str(path), fingerprint, now_iso()),
+                "INSERT INTO maps (site, page_type, version, path, fingerprint, created_at, dry_run_items)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (site, page_type, version, str(path), fingerprint, now_iso(), dry_run_items),
+            )
+
+    def map_row(self, site: str, page_type: str, version: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM maps WHERE site = ? AND page_type = ? AND version = ?",
+            (site, page_type, version),
+        ).fetchone()
+
+    def update_drift(self, site: str, page_type: str, version: int, *, last_fingerprint: str,
+                     drift_count: int, baseline: str | None = None) -> None:
+        """Record the latest run's fingerprint and mismatch streak. ``baseline``
+        replaces the stored fingerprint (used when the stored one is from an
+        older fingerprint scheme)."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE maps SET last_fingerprint = ?, drift_count = ?,"
+                " fingerprint = COALESCE(?, fingerprint)"
+                " WHERE site = ? AND page_type = ? AND version = ?",
+                (last_fingerprint, drift_count, baseline, site, page_type, version),
             )
 
     def current_map(self, site: str, page_type: str) -> sqlite3.Row | None:

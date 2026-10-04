@@ -22,6 +22,11 @@ log = logging.getLogger("agent_surf.runner")
 Guard = Callable[[ReadOnlyPage], None]
 
 
+DRIFT_RUNS = 3            # warn when the fingerprint differs this many runs in a row
+HEALTH_MIN_ITEMS = 0.5    # first pass below this share of the dry-run count -> warn
+HEALTH_MIN_COMPLETE = 0.8 # below this share of items with all required fields -> warn
+
+
 class NoMap(RuntimeError):
     pass
 
@@ -41,7 +46,8 @@ class RunResult:
     clicks: int = 0
     stop_reason: str = ""
     fingerprint: str | None = None
-    drift: bool = False
+    drift_count: int = 0      # consecutive runs whose fingerprint differs from the learned one
+    drift: bool = False       # a drift or health warning was logged this run (advisory only)
 
 
 def load_current_map(store: Store, site: str, page_type: str) -> dict:
@@ -63,6 +69,34 @@ def extract_items(m: dict, source: str, page: ReadOnlyPage, responses: list | No
 def required_for(m: dict, source: str) -> list[str]:
     fields = m[source]["fields"]
     return [r for r in m["required_fields"] if r in fields]
+
+
+def track_drift(store: Store, m: dict, fp: str) -> int:
+    """Update the per-map mismatch streak and return it. A stored fingerprint
+    from an older scheme is replaced by this run's (no warning)."""
+    row = store.map_row(m["site"], m["page_type"], m["version"]) if "version" in m else None
+    if row is None:
+        return 0
+    baseline = row["fingerprint"]
+    if not baseline or not baseline.startswith(sitemap.FINGERPRINT_PREFIX):
+        store.update_drift(m["site"], m["page_type"], m["version"], last_fingerprint=fp,
+                           drift_count=0, baseline=fp)
+        return 0
+    count = 0 if fp == baseline else (row["drift_count"] or 0) + 1
+    store.update_drift(m["site"], m["page_type"], m["version"], last_fingerprint=fp, drift_count=count)
+    return count
+
+
+def health_problems(batch: list[dict], required: list[str], dry_run_items: int | None) -> list[str]:
+    ids = {it["item_id"] for it in batch if it["item_id"]}
+    complete = {it["item_id"] for it in batch
+                if it["item_id"] and sitemap.has_required(it["fields"], required)}
+    problems = []
+    if dry_run_items and len(ids) < HEALTH_MIN_ITEMS * dry_run_items:
+        problems.append(f"first pass found {len(ids)} item(s), the learner's dry run found {dry_run_items}")
+    if ids and len(complete) < HEALTH_MIN_COMPLETE * len(ids):
+        problems.append(f"only {len(complete)} of {len(ids)} item(s) have all required fields")
+    return problems
 
 
 def run(store: Store, page: ReadOnlyPage, site: str, page_type: str, *,
@@ -107,10 +141,11 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
         guard(page)
 
     result.fingerprint = sitemap.fingerprint(page.aria_snapshot())
-    if m.get("fingerprint") and result.fingerprint != m["fingerprint"]:
+    result.drift_count = track_drift(store, m, result.fingerprint)
+    if result.drift_count >= DRIFT_RUNS:
         result.drift = True
-        log.warning("layout drift on %s %s: page structure differs from when the map was learned",
-                    site, page_type)
+        log.warning("layout drift on %s %s: page structure has differed from when the map was "
+                    "learned for %d runs in a row", site, page_type, result.drift_count)
 
     def pass_items(source: str) -> list[dict]:
         nonlocal cursor
@@ -139,6 +174,12 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
             if not any(it["item_id"] and sitemap.has_required(it["fields"], required) for it in batch):
                 raise MapBroken(f"every item misses a required field ({', '.join(required)})", m)
             result.source = chosen
+            row = store.map_row(site, page_type, m["version"]) if "version" in m else None
+            problems = health_problems(batch, required, row["dry_run_items"] if row else None)
+            if problems:
+                result.drift = True
+                log.warning("extraction health dropped on %s %s: %s", site, page_type,
+                            "; ".join(problems))
             if chosen != m["source"]:
                 log.warning("%s source found nothing; using %s fallback", m["source"], chosen)
         else:

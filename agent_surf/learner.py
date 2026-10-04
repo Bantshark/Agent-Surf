@@ -180,6 +180,19 @@ def dry_run(m: dict, page: ReadOnlyPage) -> tuple[int, list[str]]:
     return main, warnings
 
 
+def first_pass_count(m: dict, page: ReadOnlyPage, pre_scroll_seq: int) -> int:
+    """Complete items the map's source extracts as the runner's first pass would
+    see them. Network: responses captured before the learner's scroll. DOM: the
+    current DOM (the pre-scroll DOM is gone; this can over-count)."""
+    source = m["source"]
+    responses = None
+    if source == "network":
+        responses = [r for r in page.buffer.all() if r.seq <= pre_scroll_seq]
+    required = runner.required_for(m, source)
+    return len({it["item_id"] for it in runner.extract_items(m, source, page, responses)
+                if it["item_id"] and sitemap.has_required(it["fields"], required)})
+
+
 def learn(store: Store, page: ReadOnlyPage, site: str, page_type: str, *, client: Any, model: str,
           maps_dir: Any, query: str | None = None, handle: str | None = None,
           old_map: dict | None = None, broken_reason: str | None = None,
@@ -189,6 +202,10 @@ def learn(store: Store, page: ReadOnlyPage, site: str, page_type: str, *, client
     page.goto(url)
     guard(page)
     page.wait(LEARN_DELAY_S)
+    # Fingerprint and first-pass baseline come from the same page state the
+    # runner measures: after navigation and one wait, before any scroll.
+    fingerprint_aria = page.aria_snapshot()
+    pre_scroll_seq = page.buffer.last_seq
     page.scroll()  # trigger one pagination request so the model sees its shape
     page.wait(LEARN_DELAY_S)
     guard(page)
@@ -208,7 +225,7 @@ def learn(store: Store, page: ReadOnlyPage, site: str, page_type: str, *, client
     # Identity and provenance are ours, not the model's.
     m["site"], m["page_type"] = site, page_type
     m["version"] = store.next_version(site, page_type)
-    m["fingerprint"] = sitemap.fingerprint(aria)
+    m["fingerprint"] = sitemap.fingerprint(fingerprint_aria)
     m["learned_at"] = now_iso()
     m["learned_by"] = model
 
@@ -221,9 +238,10 @@ def learn(store: Store, page: ReadOnlyPage, site: str, page_type: str, *, client
     for w in warnings:
         log.warning(w)
 
+    first_pass = first_pass_count(m, page, pre_scroll_seq)
     path = sitemap.save_map(maps_dir, m)
-    store.add_map(site, page_type, m["version"], path, m["fingerprint"])
-    log.info("saved %s (dry run: %d items)", path.name, n)
+    store.add_map(site, page_type, m["version"], path, m["fingerprint"], dry_run_items=first_pass)
+    log.info("saved %s (dry run: %d items, %d before scrolling)", path.name, n, first_pass)
     return m
 
 

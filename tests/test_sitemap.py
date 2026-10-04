@@ -180,8 +180,21 @@ SNAP_B = """- main:
       - /url: https://feed.test/u/carol
 """
 
+# Inside the items differs (no links): item internals do not count.
+SNAP_INNER = """- main:
+  - heading "Feed" [level=1]
+  - article:
+    - paragraph: first post
+    - list:
+      - listitem: photo
+  - article:
+    - paragraph: second post
+"""
+
+# The items moved out of main into a sidebar: structural change.
 SNAP_C = """- main:
   - heading "Feed" [level=1]
+- complementary:
   - article:
     - paragraph: first post
   - article:
@@ -189,9 +202,10 @@ SNAP_C = """- main:
 """
 
 
-def test_fingerprint_ignores_text_and_counts():
+def test_fingerprint_ignores_text_counts_and_item_internals():
     assert sitemap.fingerprint(SNAP_A) == sitemap.fingerprint(SNAP_B)
-    assert sitemap.fingerprint(SNAP_A).startswith("sha256-")
+    assert sitemap.fingerprint(SNAP_A) == sitemap.fingerprint(SNAP_INNER)
+    assert sitemap.fingerprint(SNAP_A).startswith(sitemap.FINGERPRINT_PREFIX)
 
 
 def test_fingerprint_detects_structure_change():

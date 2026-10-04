@@ -45,7 +45,7 @@ def test_valid_map_saved(store, har_page, tmp_path):
     client = FakeClient(fenced(model_map()))
     m = learn(store, har_page("feed.har"), client, tmp_path)
     assert m["version"] == 1 and m["learned_by"] == MODEL
-    assert m["fingerprint"].startswith("sha256-")
+    assert m["fingerprint"].startswith(sitemap.FINGERPRINT_PREFIX)
     row = store.current_map("feedtest", "home")
     assert row["version"] == 1
     assert sitemap.load_map(row["path"]) == m

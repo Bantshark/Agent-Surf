@@ -154,7 +154,9 @@ def test_learn_run_delta_and_self_heal(chrome_on_feed, tmp_path, monkeypatch, ca
 
     # run: zero model calls, all 15 items, then nothing new.
     assert cli.main(["run", "feedtest", "home", "--json"]) == 0
-    items = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    assert "layout drift" not in captured.err and "health dropped" not in captured.err
+    items = json.loads(captured.out)
     assert [i["item_id"] for i in items] == [f"p{i}" for i in range(1, 16)]
     assert items[0]["text"] == "Synthetic post 1"
     assert cli.main(["run", "feedtest", "home", "--json"]) == 0
