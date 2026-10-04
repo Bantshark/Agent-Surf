@@ -155,8 +155,8 @@ def cmd_scrub(cfg: config.Config, args: argparse.Namespace) -> int:
     from agent_surf import har_scrub
 
     stats = har_scrub.scrub_file(args.src, args.dst)
-    log.info("scrubbed %s -> %s: removed %d header(s), %d cookie(s); redacted %d query param(s)",
-             args.src, args.dst, stats.headers, stats.cookies, stats.params)
+    log.info("scrubbed %s -> %s: removed %d header(s), %d cookie(s); redacted %d param(s), %d body(ies)",
+             args.src, args.dst, stats.headers, stats.cookies, stats.params, stats.bodies)
     return EXIT_OK
 
 

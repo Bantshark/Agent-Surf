@@ -4,8 +4,14 @@ Metadata, subtitles (written to a temp dir, returned as text), comments
 (best-effort) and ``ytsearchN:`` queries. Only ids not seen before are
 returned, using the same ``seen`` table as the runner.
 
+Media is never downloaded, so the YouTube player JavaScript is skipped
+(``player_skip: js``) and "no formats" is not an error. That means no
+JS-challenge solver is needed: no yt-dlp-ejs package and no remote components
+fetched at runtime. Node stays configured as the JS runtime per the brief.
+
 Deliberately never set: exec / exec_before_download, external downloaders
-(aria2c etc.), the write*link family, netrc_cmd, postprocessors.
+(aria2c etc.), the write*link family, netrc_cmd, postprocessors,
+remote_components.
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ MAX_COMMENTS = 100
 FORBIDDEN_OPTS = frozenset({
     "exec", "exec_before_download", "external_downloader", "external_downloader_args",
     "writelink", "writeurllink", "writewebloclink", "writedesktoplink", "netrc_cmd",
-    "postprocessors",
+    "postprocessors", "remote_components",
 })
 
 
@@ -78,9 +84,11 @@ def build_opts(*, subs: bool = False, comments: bool = False, flat: bool = False
         "no_warnings": True,
         "noprogress": True,
         "skip_download": True,
+        "ignore_no_formats_error": True,
         "js_runtimes": {"node": {}},
         "logger": _Logger(),
     }
+    extractor_args: dict[str, list[str]] = {"player_skip": ["js"]}
     if flat:
         opts["extract_flat"] = "in_playlist"
     if subs:
@@ -89,8 +97,9 @@ def build_opts(*, subs: bool = False, comments: bool = False, flat: bool = False
         opts.update(writesubtitles=True, writeautomaticsub=True, subtitlesformat="vtt",
                     outtmpl=str(outdir / "%(id)s.%(ext)s"))
     if comments:
-        opts.update(getcomments=True,
-                    extractor_args={"youtube": {"max_comments": [str(MAX_COMMENTS)]}})
+        opts["getcomments"] = True
+        extractor_args["max_comments"] = [str(MAX_COMMENTS)]
+    opts["extractor_args"] = {"youtube": extractor_args}
     assert not FORBIDDEN_OPTS & opts.keys()
     return opts
 

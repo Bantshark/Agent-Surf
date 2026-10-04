@@ -24,6 +24,10 @@ def problems_in_har(har):
                     problems.append(f"entry {i} {side} header {name}")
             if msg.get("cookies"):
                 problems.append(f"entry {i} {side} has cookies")
+            post = msg.get("postData") or {}
+            for p in post.get("params") or []:
+                if TOKENISH.search(str(p.get("name", ""))) and p.get("value") != "REDACTED":
+                    problems.append(f"entry {i} {side} body param {p.get('name')}")
             for p in msg.get("queryString") or []:
                 if TOKENISH.search(str(p.get("name", ""))) and p.get("value") != "REDACTED":
                     problems.append(f"entry {i} {side} query param {p.get('name')}")

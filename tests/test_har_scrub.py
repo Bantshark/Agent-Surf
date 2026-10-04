@@ -22,6 +22,8 @@ def dirty_har():
             "cookies": [{"name": "sid", "value": SECRET}],
             "queryString": [{"name": "q", "value": "ok"}, {"name": "auth_token", "value": SECRET},
                             {"name": "sessionid", "value": SECRET}],
+            "postData": {"mimeType": "application/json", "text": json.dumps({"token": SECRET}),
+                         "params": [{"name": "csrf", "value": SECRET}]},
         },
         "response": {
             "status": 302,
@@ -48,6 +50,30 @@ def test_scrub_removes_everything_sensitive():
     assert (stats.headers, stats.cookies) == (8, 2)
     assert problems_in_har(clean) == []
     assert problems_in_har(dirty_har())  # the guard notices the dirty input
+
+
+def test_scrub_request_bodies():
+    def post(mime, text, params=None):
+        har = {"log": {"entries": [{"request": {"method": "POST", "url": "https://feed.test/api",
+                                                "headers": [], "postData": {"mimeType": mime, "text": text}}}]}}
+        if params is not None:
+            har["log"]["entries"][0]["request"]["postData"]["params"] = params
+        clean, stats = scrub_har(har)
+        return clean["log"]["entries"][0]["request"]["postData"], stats
+
+    body, _ = post("application/json", json.dumps({"query": "q", "variables": {"csrf_token": SECRET, "n": 1}}))
+    assert json.loads(body["text"]) == {"query": "q", "variables": {"csrf_token": REDACTED, "n": 1}}
+
+    body, _ = post("application/x-www-form-urlencoded", f"q=ok&session={SECRET}",
+                   [{"name": "q", "value": "ok"}, {"name": "session", "value": SECRET}])
+    assert body["text"] == f"q=ok&session={REDACTED}"
+    assert body["params"][1]["value"] == REDACTED
+
+    body, stats = post("text/plain", f"x-auth={SECRET}")
+    assert body["text"] == REDACTED and stats.bodies == 1
+
+    body, _ = post("application/json", '{"query": "no secrets here"}')
+    assert json.loads(body["text"]) == {"query": "no secrets here"}
 
 
 def test_scrub_leaves_original_untouched():

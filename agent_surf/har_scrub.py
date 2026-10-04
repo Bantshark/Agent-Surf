@@ -3,7 +3,10 @@
 Removes Cookie, Set-Cookie, Authorization, x-csrf-token, x-guest-token and any
 header whose name matches (?i)token|auth|session|csrf, from requests and
 responses; drops ``cookies`` arrays; redacts query parameters whose name
-matches the same pattern. Values are never printed.
+matches the same pattern. Request bodies (``postData``) get the same
+treatment: matching form params and JSON keys are redacted; a body that cannot
+be parsed but mentions a matching name is replaced wholesale. Values are never
+printed.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ class ScrubStats:
     headers: int = 0
     cookies: int = 0
     params: int = 0
+    bodies: int = 0
 
 
 def is_sensitive(name: str) -> bool:
@@ -49,6 +53,51 @@ def scrub_url(url: str, stats: ScrubStats | None = None) -> str:
     return urlunsplit(parts._replace(query=query))
 
 
+def _redact_json(obj: Any, stats: ScrubStats) -> Any:
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if SENSITIVE_RE.search(str(k)):
+                out[k] = REDACTED
+                stats.params += 1
+            else:
+                out[k] = _redact_json(v, stats)
+        return out
+    if isinstance(obj, list):
+        return [_redact_json(v, stats) for v in obj]
+    return obj
+
+
+def _scrub_body(text: str, mime: str, stats: ScrubStats) -> str:
+    mime = mime.lower()
+    if "json" in mime:
+        try:
+            return json.dumps(_redact_json(json.loads(text), stats), ensure_ascii=False)
+        except ValueError:
+            pass
+    elif "x-www-form-urlencoded" in mime:
+        pairs = parse_qsl(text, keep_blank_values=True)
+        if pairs:
+            hits = sum(1 for k, _ in pairs if SENSITIVE_RE.search(k))
+            if not hits:
+                return text
+            stats.params += hits
+            return urlencode([(k, REDACTED if SENSITIVE_RE.search(k) else v) for k, v in pairs])
+    if SENSITIVE_RE.search(text):
+        stats.bodies += 1
+        return REDACTED
+    return text
+
+
+def _scrub_post_data(post: dict, stats: ScrubStats) -> None:
+    for p in post.get("params") or []:
+        if isinstance(p, dict) and SENSITIVE_RE.search(str(p.get("name", ""))):
+            p["value"] = REDACTED
+            stats.params += 1
+    if isinstance(post.get("text"), str) and post["text"]:
+        post["text"] = _scrub_body(post["text"], str(post.get("mimeType", "")), stats)
+
+
 def _scrub_message(msg: dict, stats: ScrubStats) -> None:
     headers = msg.get("headers")
     if isinstance(headers, list):
@@ -68,6 +117,8 @@ def _scrub_message(msg: dict, stats: ScrubStats) -> None:
             if SENSITIVE_RE.search(str(p.get("name", ""))):
                 p["value"] = REDACTED
                 stats.params += 1
+    if isinstance(msg.get("postData"), dict):
+        _scrub_post_data(msg["postData"], stats)
 
 
 def scrub_har(har: dict) -> tuple[dict, ScrubStats]:

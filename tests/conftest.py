@@ -4,13 +4,43 @@ Nothing here touches the network: every request is answered from a HAR under
 tests/fixtures/ and anything not in the HAR is aborted.
 """
 
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
-import pytest
 
-from agent_surf import sites
-from agent_surf.browser import ReadOnlyPage
-from agent_surf.store import Store
+def _use_system_packages():
+    """The preinstalled pytest may live in an isolated venv that cannot see the
+    pinned packages installed for the system python3. Append (never prepend)
+    that site-packages dir so pytest's own modules still win, and export it
+    for test subprocesses."""
+    try:
+        import playwright  # noqa: F401
+        return
+    except ImportError:
+        pass
+    py = shutil.which("python3")
+    if not py:
+        return
+    out = subprocess.run(
+        [py, "-c", "import os, playwright; print(os.path.dirname(os.path.dirname(playwright.__file__)))"],
+        capture_output=True, text=True)
+    path = out.stdout.strip()
+    if out.returncode == 0 and path:
+        sys.path.append(path)
+        os.environ["PYTHONPATH"] = os.pathsep.join(
+            p for p in (os.environ.get("PYTHONPATH"), path) if p)
+
+
+_use_system_packages()
+
+import pytest  # noqa: E402
+
+from agent_surf import sites  # noqa: E402
+from agent_surf.browser import ReadOnlyPage  # noqa: E402
+from agent_surf.store import Store  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FEED_SITE = sites.Site("feedtest", ("feed.test",), {"home": "https://feed.test/"})

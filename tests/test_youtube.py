@@ -93,12 +93,16 @@ def test_opts_never_contain_forbidden_keys(tmp_path):
             assert not youtube.FORBIDDEN_OPTS & opts.keys()
             assert opts["skip_download"] is True
             assert opts["js_runtimes"] == {"node": {}}
+            assert opts["ignore_no_formats_error"] is True
+            assert opts["extractor_args"]["youtube"]["player_skip"] == ["js"]
+            assert ("max_comments" in opts["extractor_args"]["youtube"]) == comments
 
 
 def test_real_youtubedl_accepts_opts(tmp_path):
     from yt_dlp import YoutubeDL
     with YoutubeDL(youtube.build_opts(subs=True, comments=True, outdir=tmp_path)) as ydl:
         assert ydl.params["writesubtitles"] and ydl.params["getcomments"]
+        assert not ydl.params["remote_components"]
 
 
 def test_metadata_is_json_serialisable():
