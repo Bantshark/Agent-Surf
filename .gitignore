@@ -1,0 +1,19 @@
+# Local runtime state — profiles, DB, learned maps
+.agent-surf/
+chrome-profile/
+*.db
+*.sqlite
+
+# Raw recordings may hold live cookies; only scrubbed fixtures under tests/fixtures/ are committed
+*.har
+!tests/fixtures/*.har
+
+# Secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/

@@ -1,0 +1,235 @@
+# Agent Surf — Build Brief
+
+This is the authority for the BUILD phase. It was produced locally through the
+RESEARCH and UNDERSTAND phases of a gated workflow. Build exactly this. Anything
+not covered here is a **named gap**: stop and report it, do not improvise.
+
+## What Agent Surf is
+
+A local agent browser with interface memory. A large model learns a page once
+and writes a **site map**. Deterministic code replays the map on every later
+run with **zero model calls**. The model is called again only when the map
+breaks (self-heal). Each run returns **only items not seen before**.
+
+Targets: X, Reddit, Instagram, Facebook, LinkedIn (browser + site maps) and
+YouTube (yt-dlp adapter, no map).
+
+## Hard rules
+
+1. **Dependencies: only the approved list below, at the exact pinned version.**
+   A package that surfaces mid-build is a gap — report it, do not install it.
+   Use the cloud image's preinstalled `pytest`; do not add test dependencies.
+   No build backend (no setuptools/hatchling): run as `python -m agent_surf`.
+2. **Never touch live social sites from the cloud.** All tests use synthetic
+   fixtures served through Playwright `route_from_har`. Datacenter IPs get
+   blocked anyway, and there is no logged-in profile in the cloud.
+3. **The repo is public.** Never commit a HAR, snapshot or fixture containing
+   real cookies, auth headers, tokens or personal data. Fixtures are synthetic.
+   The scrub test (below) must pass on every fixture.
+4. **Read-only by construction.** The runner may only: navigate to URLs on the
+   map's own site domain, scroll, wait, and click selectors stored in a map.
+   No typing, no form submission, no posting. Model output never becomes an
+   action outside this whitelist.
+5. **CAPTCHAs are never bypassed.** Detect, pause, notify the human, wait.
+6. **Anthropic SDK 1.x**: `temperature`, `top_p`, `top_k` no longer exist on
+   `messages.create()`. Do not pass them.
+
+## Approved dependencies
+
+| Package | Version | Notes |
+|---|---|---|
+| `playwright` (PyPI) | `1.62.0` | Chromium installed via `playwright install --with-deps chromium` |
+| `anthropic` (PyPI) | `1.3.0` | Learner only |
+| `yt-dlp` (PyPI) | `2026.8.19` | **No extras.** Uses Node (preinstalled) as JS runtime |
+| stdlib | — | `sqlite3`, `json`, `urllib`, `hashlib`, `argparse`, `re` |
+
+yt-dlp: never use `--exec`, aria2c / external downloaders, `--write-link`
+family, or `--netrc-cmd` (all had command-injection CVEs; fixed in this
+version, but the build has no reason to touch them).
+
+## Layout
+
+```
+agent_surf/
+  __main__.py      # python -m agent_surf → cli.main()
+  cli.py           # argparse subcommands
+  config.py        # env vars + defaults
+  store.py         # SQLite: maps, seen, items
+  sitemap.py       # map schema, validation, path extraction
+  sites.py         # site registry: domains, page types, URL templates
+  browser.py       # CDP connect + network response capture
+  runner.py        # deterministic replay, delta stop
+  learner.py       # Claude → map, validate, self-heal
+  challenge.py     # CAPTCHA/checkpoint detection + Telegram ping + wait
+  youtube.py       # yt-dlp adapter
+  har_scrub.py     # strip cookies/auth from HAR files
+tests/
+  fixtures/        # synthetic HARs + aria snapshots only
+  test_*.py
+requirements.txt   # the three pins, nothing else
+```
+
+## Config (env vars)
+
+| Var | Default | Use |
+|---|---|---|
+| `AGENT_SURF_CDP_URL` | `http://127.0.0.1:9222` | User's Chrome |
+| `AGENT_SURF_HOME` | `~/.agent-surf` | DB, learned maps, chrome profile |
+| `AGENT_SURF_MODEL` | `claude-sonnet-5-5` | Learner model |
+| `ANTHROPIC_API_KEY` | — | Learner only; never logged |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | — | CAPTCHA ping; if unset, print to stderr and wait |
+
+Never print, log or store a secret value.
+
+## Components
+
+### browser.py
+- Connect with `chromium.connect_over_cdp(AGENT_SURF_CDP_URL)`; use the
+  existing default context. Agent Surf never launches Chrome with the user's
+  real profile and never handles credentials.
+- `agent-surf chrome` prints the launch command for a **dedicated** profile:
+  `chrome --remote-debugging-port=9222 --user-data-dir=<AGENT_SURF_HOME>/chrome-profile`
+  (Chrome 136+ ignores the debug port on the default profile.) Note in the
+  output that the port gives full control of that profile to local processes.
+- Response capture: `page.on("response")`, keep responses whose content-type
+  is JSON, store `(url, method, status, parsed_json)` in a bounded buffer.
+  Ignore bodies that fail to parse; never raise from the listener.
+
+### sitemap.py — the map
+One JSON file per `(site, page_type)` in `<AGENT_SURF_HOME>/maps/`, history kept
+as `<site>.<page_type>.v<N>.json`, current version recorded in SQLite.
+
+```json
+{
+  "site": "x",
+  "page_type": "search",
+  "version": 1,
+  "source": "network",
+  "network": {
+    "url_regex": "SearchTimeline",
+    "items_path": "data.search.timeline.instructions[*].entries[*]",
+    "id_path": "entryId",
+    "fields": {"text": "content.legacy.full_text", "author": "content.user.screen_name"}
+  },
+  "dom": {
+    "item": "article[data-testid=tweet]",
+    "id_attr": "aria-labelledby",
+    "fields": {"text": "[data-testid=tweetText]"}
+  },
+  "required_fields": ["text"],
+  "fingerprint": "sha256-of-normalised-aria-skeleton",
+  "scroll": {"max_scrolls": 30, "delay_s": 2.0, "stop_after_seen": 5},
+  "limits": {"max_items": 200},
+  "learned_at": "ISO-8601",
+  "learned_by": "model id"
+}
+```
+- `source` is `network` (preferred) or `dom`. Both blocks may exist; the runner
+  tries `source` first and the other as fallback.
+- Path language (implement it, no jsonpath dependency): dot keys, `[N]` index,
+  `[*]` fan-out. Missing key → no value, never an exception.
+- `validate_map(dict) -> list[str]` returns problems; empty list = valid.
+  Reject unknown top-level keys, regex that fails to compile, CSS that is empty,
+  limits above hard ceilings (`max_scrolls` ≤ 100, `max_items` ≤ 1000,
+  `delay_s` ≥ 1.0).
+- Fingerprint: hash of the aria snapshot with all names/text stripped, roles and
+  nesting only. Used to *report* layout drift, not to block a run.
+
+### sites.py
+Registry: site → allowed domains, page types, URL templates with `{query}` /
+`{handle}` placeholders. Initial set:
+- x: `home`, `search`, `profile` — x.com
+- reddit: `subreddit`, `post`, `search` — reddit.com
+- instagram: `profile`, `feed` — instagram.com
+- facebook: `page`, `feed` — facebook.com
+- linkedin: `profile`, `feed`, `jobs` — linkedin.com
+Navigation outside a site's domains is refused.
+
+### store.py (SQLite at `<AGENT_SURF_HOME>/surf.db`)
+Tables: `maps(site, page_type, version, path, fingerprint, created_at)`,
+`seen(site, page_type, item_id, first_seen)` with a unique key,
+`items(site, page_type, item_id, data_json, captured_at)`.
+
+### runner.py — zero model calls
+1. Load current map; refuse if none (tell the user to `learn`).
+2. Navigate to the templated URL; run challenge check.
+3. Loop: extract items (network buffer first, DOM fallback) → for each with an
+   id: if unseen, record + emit; count consecutive already-seen items.
+   Stop on `stop_after_seen`, `max_scrolls`, or `max_items`. Scroll, wait
+   `delay_s`, challenge check, repeat.
+4. If the first pass yields zero items or every item misses a required field,
+   signal `MapBroken` (runner does not call the model itself).
+Output: list of new items as dicts with `site`, `page_type`, `item_id`, fields.
+
+### learner.py
+- Inputs to the model: the aria snapshot of the page (truncated to a budget)
+  plus up to 30 captured JSON responses, each reduced to url, status and a key
+  skeleton with sample values truncated to 80 chars. Page content is wrapped as
+  untrusted data, and the prompt says so.
+- Output: a single JSON map. Parse → `validate_map` → dry-run extraction on the
+  current page/buffer → require ≥ 3 items with ids and required fields. Only
+  then save as a new version.
+- Self-heal: on `MapBroken`, relearn once per run with the old map as a hint.
+  Two failures → stop and report; never loop.
+- The model client is injected (`learn(..., client=...)`) so tests use a fake.
+
+### challenge.py
+Detect: URL path contains `/challenge`, `/checkpoint`, `/captcha`; title
+"Just a moment"; iframes from `challenges.cloudflare.com`, `recaptcha`,
+`hcaptcha`. On detection: send one Telegram message (Bot API `sendMessage` via
+`urllib`, token never logged), then poll every 5 s until the challenge is gone
+or 10 minutes pass (then exit non-zero). Never interact with the challenge.
+
+### youtube.py
+yt-dlp Python API (`yt_dlp.YoutubeDL`): metadata, subtitles (`writesubtitles`,
+`writeautomaticsub`, `skip_download`), comments (best-effort), `ytsearchN:`.
+Return JSON-serialisable dicts. Delta logic via the same `seen` table.
+
+### har_scrub.py
+Remove `Cookie`, `Set-Cookie`, `Authorization`, `x-csrf-token`,
+`x-guest-token` and any header matching `(?i)token|auth|session|csrf` from
+requests and responses; drop `cookies` arrays; redact query params with the
+same pattern. `agent-surf scrub in.har out.har`.
+
+### cli.py
+```
+agent-surf chrome
+agent-surf learn <site> <page_type> [--query Q | --handle H]
+agent-surf run   <site> <page_type> [--query Q | --handle H] [--json]
+agent-surf maps  list | show <site> <page_type>
+agent-surf youtube <url-or-ytsearch> [--subs] [--comments] [--json]
+agent-surf scrub <in.har> <out.har>
+```
+`--json` prints new items as a JSON array on stdout; logs go to stderr.
+
+## Tests (offline, cloud-safe)
+- Path language: nesting, `[*]`, missing keys.
+- `validate_map`: good map passes; each bad case reports a problem.
+- Runner against a synthetic HAR site (`https://feed.test/...` with an HTML
+  page + JSON API responses): extracts items, stops after N seen, second run
+  returns nothing new, DOM fallback works when the network block is absent.
+- Learner with a fake client: valid map saved; invalid JSON rejected; map that
+  extracts < 3 items rejected; self-heal runs at most once.
+- Challenge detection on synthetic pages; Telegram call mocked.
+- Domain lock: navigation off-site is refused.
+- **Scrub guard:** every file under `tests/fixtures/` contains no `Cookie`,
+  `Authorization` or token-shaped header. This test must never be skipped.
+
+## Build order
+1. `requirements.txt`, package skeleton, `config.py`
+2. `store.py`
+3. `sitemap.py` (+ path language) and tests
+4. `sites.py` + domain lock
+5. `browser.py`
+6. `runner.py` + synthetic HAR fixtures and tests
+7. `learner.py` + fake-client tests
+8. `challenge.py` + tests
+9. `youtube.py`
+10. `har_scrub.py` + scrub guard test
+11. `cli.py`, README usage section
+
+Complete each unit with its tests before moving on.
+
+## Out of scope for v1
+MCP server, Supabase, scheduling, multi-account rotation, proxies, any
+anti-detection or CAPTCHA-solving technique.
