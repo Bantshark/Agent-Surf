@@ -38,6 +38,7 @@ class RunResult:
     items: list[dict] = field(default_factory=list)
     source: str | None = None
     scrolls: int = 0
+    clicks: int = 0
     stop_reason: str = ""
     fingerprint: str | None = None
     drift: bool = False
@@ -86,6 +87,24 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
     guard(page)
     page.wait(delay)
     guard(page)
+
+    click_selectors = list(m.get("click") or [])
+
+    def expand() -> int:
+        """Click the map's safe "show more" controls; off for the run after any navigation."""
+        nonlocal click_selectors
+        if not click_selectors:
+            return 0
+        clicks, navigated = page.expand(click_selectors)
+        result.clicks += clicks
+        if navigated:
+            log.warning("a click changed the page URL; no more clicks this run")
+            click_selectors = []
+        return clicks
+
+    if expand():
+        page.wait(delay)
+        guard(page)
 
     result.fingerprint = sitemap.fingerprint(page.aria_snapshot())
     if m.get("fingerprint") and result.fingerprint != m["fingerprint"]:
@@ -151,6 +170,7 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
             break
         page.scroll()
         result.scrolls += 1
+        expand()
         page.wait(delay)
         guard(page)
         page.check_domain()

@@ -94,7 +94,7 @@ def test_goto_detects_off_site_redirect():
 
 def test_read_only_surface():
     public = {n for n in dir(ReadOnlyPage) if not n.startswith("_")}
-    assert public == {"goto", "scroll", "wait", "check_domain", "url", "title",
+    assert public == {"goto", "scroll", "wait", "expand", "check_domain", "url", "title",
                       "frame_urls", "aria_snapshot", "dom_items", "close"}
 
 

@@ -16,7 +16,7 @@ from typing import Any, Iterable
 
 ALLOWED_KEYS = {
     "site", "page_type", "version", "source", "network", "dom", "required_fields",
-    "fingerprint", "scroll", "limits", "learned_at", "learned_by",
+    "fingerprint", "scroll", "limits", "learned_at", "learned_by", "click",
 }
 REQUIRED_KEYS = {"site", "page_type", "source", "required_fields", "scroll", "limits"}
 NETWORK_KEYS = {"url_regex", "items_path", "id_path", "fields"}
@@ -29,6 +29,7 @@ RESERVED_FIELDS = {"site", "page_type", "item_id"}
 
 MAX_SCROLLS_CEILING = 100
 MAX_ITEMS_CEILING = 1000
+MAX_CLICK_SELECTORS = 5
 MIN_DELAY_S = 1.0
 
 _NAME_RE = re.compile(r"^[a-z0-9_]+$")
@@ -210,6 +211,14 @@ def validate_map(m: Any) -> list[str]:
                 problems.append("dom.id_attr: must be a non-empty attribute name")
             if "fields" in dom:
                 _check_fields(dom["fields"], "dom.fields", _check_css, problems)
+
+    if "click" in m:
+        click = m["click"]
+        if not isinstance(click, list) or not 1 <= len(click) <= MAX_CLICK_SELECTORS:
+            problems.append(f"click: must be a list of 1..{MAX_CLICK_SELECTORS} CSS selectors")
+        else:
+            for i, sel in enumerate(click):
+                _check_css(sel, f"click[{i}]", problems)
 
     req = m.get("required_fields")
     if "required_fields" in m:

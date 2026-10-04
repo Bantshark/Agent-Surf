@@ -55,6 +55,10 @@ Reply with exactly one JSON object and nothing else, with these keys:
 - "required_fields": field names every real item has (e.g. ["text"]).
 - "scroll": {{"max_scrolls": <= 100, "delay_s": >= 1.0, "stop_after_seen": >= 1}}.
 - "limits": {{"max_items": <= 1000}}.
+- "click" (optional): up to 5 CSS selectors for "Show more" / "Load more" style
+  buttons that reveal more items or the rest of a truncated item. Only use it if
+  scrolling alone does not load more items. Never point it at links or at
+  like/follow/reply/share/post/sign-in controls; such clicks are refused anyway.
 No other keys. Field names must not be "site", "page_type" or "item_id".
 
 Path language for JSON: dot keys, [N] index, [*] fan-out over a list. Example:

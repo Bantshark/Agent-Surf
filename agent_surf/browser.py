@@ -5,14 +5,16 @@ handles credentials. It attaches over CDP to a Chrome the user started with a
 dedicated profile (see ``chrome_command``) and opens its own tab there.
 
 ``ReadOnlyPage`` is the only page interface the runner, learner and challenge
-code receive. It can navigate (domain-locked), scroll, wait and read. It has
-no typing, form or click methods.
+code receive. It can navigate (domain-locked), scroll, wait, read, and click
+"show more" style controls named by a map's ``click`` selectors, but only
+those that pass ``safe_to_click``. It has no typing or form methods.
 """
 
 from __future__ import annotations
 
 import itertools
 import logging
+import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,6 +124,64 @@ _DOM_EXTRACT_JS = """([itemSel, idAttr, fields]) => {
 }"""
 
 
+# Facts about elements matching a stored click selector. Pure read.
+_CLICK_CANDIDATES_JS = """([sel, limit]) => {
+  let nodes;
+  try { nodes = document.querySelectorAll(sel); } catch (e) { return []; }
+  const out = [];
+  for (let i = 0; i < nodes.length && out.length < limit; i++) {
+    const el = nodes[i];
+    const r = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    const tag = el.tagName.toLowerCase();
+    const link = el.closest('a[href]');
+    out.push({
+      index: i,
+      tag: tag,
+      type: (el.getAttribute('type') || '').toLowerCase(),
+      text: (el.innerText || '').trim().slice(0, 200),
+      label: (el.getAttribute('aria-label') || '').trim().slice(0, 200),
+      href: link ? link.getAttribute('href') : null,
+      inForm: !!el.closest('form'),
+      inDialog: !!el.closest('dialog,[role=dialog],[role=alertdialog],[aria-modal=true]'),
+      editable: el.isContentEditable || ['input', 'textarea', 'select', 'option'].includes(tag),
+      disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
+      visible: r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none',
+    });
+  }
+  return out;
+}"""
+
+CLICK_ALLOW = re.compile(r"(?i)\b(show|see|view|load|read|expand|more|older)\b")
+CLICK_DENY = re.compile(
+    r"(?i)\b(like|unlike|love|react|follow|unfollow|subscribe|unsubscribe|post|send|reply|"
+    r"comment|repost|retweet|quote|share|join|connect|invite|message|buy|order|pay|donate|"
+    r"vote|upvote|downvote|award|save|bookmark|report|block|mute|hide|delete|remove|edit|"
+    r"sign|log|login|logout|register|submit|apply|accept|allow|confirm|install|download|"
+    r"less|account|password|email|phone|verify|with|translate|open|app)\b")
+MAX_CLICK_TEXT = 40
+MAX_CLICKS_PER_PASS = 10
+CANDIDATES_PER_SELECTOR = 20
+
+
+def safe_to_click(c: dict) -> bool:
+    """Whether a click candidate is a harmless "show more" style control."""
+    if not c.get("visible") or c.get("disabled") or c.get("editable"):
+        return False
+    if c.get("inForm") or c.get("inDialog") or c.get("type") in ("submit", "reset", "file"):
+        return False
+    href = c.get("href")
+    if href is not None and href.strip() not in ("", "#") and not href.strip().lower().startswith(
+            ("#", "javascript:void")):
+        return False  # real links navigate; v1 never follows them by clicking
+    names = [n for n in (c.get("text") or "", c.get("label") or "") if n]
+    if not names or any(len(n) > MAX_CLICK_TEXT for n in names):
+        return False
+    if any(CLICK_DENY.search(n) for n in names):
+        return False
+    return any(CLICK_ALLOW.search(n) for n in names)
+
+
 class ReadOnlyPage:
     def __init__(self, page: Any, site: sites.Site, buffer: ResponseBuffer | None = None):
         self._page = page
@@ -142,6 +202,38 @@ class ReadOnlyPage:
 
     def wait(self, seconds: float) -> None:
         self._page.wait_for_timeout(seconds * 1000)
+
+    def expand(self, selectors: list[str], max_clicks: int = MAX_CLICKS_PER_PASS) -> tuple[int, bool]:
+        """Click safe "show more" controls matching stored selectors.
+
+        Returns (clicks, navigated). Stops at the first click that changes the
+        URL; raises DomainRefused if that took the tab off the site.
+        """
+        clicks = 0
+        start_url = self._page.url
+        for sel in selectors:
+            try:
+                candidates = self._page.evaluate(_CLICK_CANDIDATES_JS, [sel, CANDIDATES_PER_SELECTOR])
+            except Exception as e:
+                log.warning("click candidates failed: %s", type(e).__name__)
+                continue
+            for c in candidates:
+                if clicks >= max_clicks:
+                    return clicks, False
+                if not safe_to_click(c):
+                    continue
+                loc = self._page.locator("css=" + sel).nth(c["index"])
+                try:
+                    if loc.inner_text(timeout=1000).strip()[:200] != c["text"]:
+                        continue  # the DOM moved under us; re-check next pass
+                    loc.click(timeout=2000)
+                except Exception:
+                    continue
+                clicks += 1
+                if self._page.url != start_url:
+                    self.check_domain()
+                    return clicks, True
+        return clicks, False
 
     # reads
 

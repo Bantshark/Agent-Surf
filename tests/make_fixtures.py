@@ -45,6 +45,56 @@ load();
 """ % {"pages": PAGES}
 
 
+# Same posts, but more are loaded only by a "Show more posts" button. Decoy
+# controls count their clicks in window.__decoys; Agent Surf must never click them.
+MORE_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Feed Test</title>
+<style>article { min-height: 300px; border-bottom: 1px solid #ccc; }</style></head>
+<body><main id="feed"><h1>Synthetic feed</h1></main>
+<div id="controls">
+  <button class="load-more" type="button">Show more posts</button>
+  <button class="nav-more" type="button">Show more</button>
+  <button class="act" type="button">Like</button>
+  <button class="act" type="button">Show less</button>
+  <button class="act" type="button" style="display:none">Show more</button>
+  <button class="act" type="button" disabled>Show more</button>
+  <a class="act" href="/u/someone">Show profile</a>
+  <form action="/more"><button class="act">Show more</button></form>
+  <div role="dialog"><button class="act" type="button">See more</button></div>
+</div>
+<script>
+window.__decoys = 0;
+let page = 0, loading = false;
+const feed = document.getElementById('feed');
+const more = document.querySelector('.load-more');
+for (const el of document.querySelectorAll('.act')) {
+  el.addEventListener('click', (e) => { window.__decoys += 1; e.preventDefault(); });
+}
+document.querySelector('.nav-more').addEventListener('click', () => history.pushState(null, '', '/more?p=2'));
+async function load() {
+  if (loading || page >= %(pages)d) return;
+  loading = true;
+  page += 1;
+  const r = await fetch('/api/feed?page=' + page);
+  const j = await r.json();
+  for (const edge of j.data.feed.edges) {
+    const n = edge.node;
+    const a = document.createElement('article');
+    a.setAttribute('data-post-id', n.id);
+    a.innerHTML = '<p class="text"></p><a class="author" href="#"></a>';
+    a.querySelector('.text').textContent = n.body.text;
+    a.querySelector('.author').textContent = n.author.handle;
+    feed.appendChild(a);
+  }
+  if (page >= %(pages)d) more.remove();
+  loading = false;
+}
+more.addEventListener('click', load);
+load();
+</script></body></html>
+""" % {"pages": PAGES}
+
+
 def feed_page(n):
     edges = []
     for k in range(PER_PAGE):
@@ -78,6 +128,7 @@ def har(entries):
 
 def build_feed():
     entries = [entry(ORIGIN + "/", "text/html; charset=utf-8", FEED_HTML),
+               entry(ORIGIN + "/more", "text/html; charset=utf-8", MORE_HTML),
                entry(ORIGIN + "/api/config", "application/json",
                      json.dumps({"features": {"dark_mode": True}}))]
     for n in range(1, PAGES + 1):
