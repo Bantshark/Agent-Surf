@@ -267,3 +267,49 @@ Gaps reported during the build, decided by the owner and implemented:
    self-heal through the CLI with a CDP-attached Chromium, a local HTTPS
    `feed.test` and the real `anthropic` SDK against a local fake API.
 
+
+## Fixes after local validation
+Local validation on Windows 11 (Python 3.12, Brave over CDP): 181/183 tests
+passed; live X search worked end to end (learn 1 model call; run 1: 80 items,
+0 model calls; run 2: 6 new, 0 overlap, stopped on stop_after_seen). Four
+issues were fixed on branch `claude/validate-fixes`:
+
+1. **CLI crashed printing non-ASCII on Windows.** Cause: Windows redirects
+   stdout as cp1252 and `--json` prints with `ensure_ascii=False`, so an emoji
+   raised a `charmap` error after the items were already marked seen.
+   Fix: `cli.main()` reconfigures stdout/stderr to UTF-8 (`errors="replace"`).
+   Test: `test_cli.py::test_cli_prints_non_ascii_on_cp1252_stdout` runs the CLI
+   as a subprocess with `PYTHONIOENCODING=cp1252` and a synthetic emoji item.
+2. **"Layout drift" warned on every run.** Cause: the fingerprint hashed every
+   item's inner structure and every sidebar module, so which posts (media,
+   text, quote) and which sidebar modules happened to be loaded changed it;
+   and learn snapshotted after a scroll and ~4 s while run snapshotted before
+   any scroll. Fix: fingerprint v2 (`v2-sha256-`) keeps landmark/container
+   roles only, with item containers (article, listitem, row, treeitem) as
+   leaves; learn fingerprints and counts its dry run before scrolling; the
+   `maps` table gains `dry_run_items`, `last_fingerprint`, `drift_count`
+   (added by `ALTER TABLE` on open); drift warns only after 3 consecutive
+   mismatching runs, an older-scheme fingerprint is re-baselined, and a health
+   drop (first pass < 50% of the dry-run count, or < 80% of items with all
+   required fields) warns at once. Always advisory. For DOM-source maps the
+   dry-run count is taken after the learner's scroll and can over-count.
+   Tests: `test_drift.py` (synthetic `drift.har`: text/count/sidebar changes
+   never warn; a removed landmark warns on the 3rd run and resets; an
+   interrupted streak does not warn; sparse and field-less pages warn at once;
+   the run right after learn is clean; an old DB migrates), updated
+   fingerprint tests in `test_sitemap.py` and `test_runner.py`, and an
+   assertion in `test_e2e.py` that the first run after learn logs no drift.
+3. **Scrub guard rejected a correctly scrubbed HAR.** Cause: the text-level
+   `JSON_HEADER` regex matched `"name": "auth_token"` even when its value was
+   `"REDACTED"`. Fix: for `.har` files only, that one check ignores
+   name/value pairs whose value is exactly `REDACTED`; the cookie/authorization,
+   header-line and bearer checks and `problems_in_har` are unchanged. Tests in
+   `test_scrub_guard.py`: planted Cookie, x-csrf-token, `?auth_token=`,
+   response cookies and a Bearer body are flagged; the same HAR after
+   `scrub_har` passes; a token-shaped name with a real value, a token-shaped
+   header valued `REDACTED`, and a `REDACTED` pair outside a HAR still fail.
+4. **CDP tests could not launch Playwright's Chromium on that machine**
+   (`WinError 14001`). Fix: tests use `AGENT_SURF_TEST_CHROME` when it names an
+   existing file (e.g. Brave or Edge), otherwise Playwright's executable as
+   before; no production change. Documented in the README Tests section.
+   Test: `test_browser.py::test_test_chrome_override`.
