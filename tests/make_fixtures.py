@@ -85,6 +85,28 @@ def build_feed():
     return har(entries)
 
 
+def page(title, body):
+    return (f"<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head>"
+            f"<body>{body}</body></html>")
+
+
+CHALLENGE_PAGES = {
+    "/clean": page("Feed Test", "<main><h1>Nothing to see</h1></main>"),
+    "/checkpoint/start": page("Checkpoint", "<main><h1>Confirm it is you</h1></main>"),
+    # Synthetic "solved by the human" case: the path changes after 1.5 s.
+    "/checkpoint/clears": page("Checkpoint", "<main><h1>Confirm it is you</h1></main>"
+                               "<script>setTimeout(() => history.replaceState(null, '', '/'), 1500)</script>"),
+    "/wait": page("Just a moment...", "<main><h1>Checking your browser</h1></main>"),
+    "/turnstile": page("Feed Test", '<iframe src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/x"></iframe>'),
+    "/recaptcha": page("Feed Test", '<iframe src="https://www.google.com/recaptcha/api2/anchor?k=synthetic"></iframe>'),
+    "/hcaptcha": page("Feed Test", '<iframe src="https://newassets.hcaptcha.com/captcha/v1/x/static/hcaptcha.html"></iframe>'),
+}
+
+
+def build_challenges():
+    return har([entry(ORIGIN + path, "text/html; charset=utf-8", html) for path, html in CHALLENGE_PAGES.items()])
+
+
 def write(name, data):
     (FIXTURES / name).write_text(json.dumps(data, indent=1) + "\n")
 
@@ -92,3 +114,4 @@ def write(name, data):
 if __name__ == "__main__":
     FIXTURES.mkdir(exist_ok=True)
     write("feed.har", build_feed())
+    write("challenges.har", build_challenges())

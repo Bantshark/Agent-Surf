@@ -160,7 +160,14 @@ class ReadOnlyPage:
             return ""
 
     def frame_urls(self) -> list[str]:
-        return [f.url for f in self._page.frames]
+        """URLs of loaded frames plus src of every iframe element (even unloaded)."""
+        urls = [f.url for f in self._page.frames]
+        try:
+            urls += self._page.evaluate(
+                "() => Array.from(document.querySelectorAll('iframe'), f => f.src || '')")
+        except Exception:
+            pass
+        return urls
 
     def aria_snapshot(self) -> str:
         try:
