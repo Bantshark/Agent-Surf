@@ -83,3 +83,13 @@ def test_challenge_during_wait_is_handled(store, har_page, tmp_path):
     assert any("/checkpoint/" in u for u in guard_calls)
     assert ids(result) == FIVE
 
+
+
+def test_learner_waits_for_late_feed(store, har_page, tmp_path):
+    client = FakeClient(fenced(model_map()))
+    m = learner.learn(store, har_page("feed.har"), "feedtest", "late", client=client,
+                      model="claude-sonnet-5-5", maps_dir=tmp_path / "maps")
+    assert m["version"] == 1
+    row = store.current_map("feedtest", "late")
+    assert row["dry_run_items"] == 5  # measured after the feed arrived, before scrolling
+    assert "Synthetic post 1" in client.calls[0]["messages"][0]["content"]

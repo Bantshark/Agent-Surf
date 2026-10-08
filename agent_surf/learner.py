@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from agent_surf import runner, sitemap, sites
@@ -180,6 +181,38 @@ def dry_run(m: dict, page: ReadOnlyPage) -> tuple[int, list[str]]:
     return main, warnings
 
 
+def item_nodes(snapshot: str) -> int:
+    return sum(1 for _, role in sitemap._aria_roles(snapshot) if role in sitemap.ITEM_ROLES)
+
+
+def wait_for_page(page: ReadOnlyPage, since_seq: int, guard: Guard, old_map: dict | None = None) -> None:
+    """Before learning, wait for a cold page's content (ceiling
+    runner.FIRST_PASS_TIMEOUT_S, challenge guard on every poll).
+
+    Self-heal: done as soon as the old map's sources have content (the runner's
+    own check). Otherwise, and as a fallback: the accessibility tree shows at
+    least MIN_ITEMS item-role nodes and is unchanged across one poll."""
+    deadline = time.monotonic() + runner.FIRST_PASS_TIMEOUT_S
+    old_sources = [s for s in sitemap.SOURCES if old_map and s in old_map]
+    last = None
+    while True:
+        if any(runner.content_ready(old_map, s, page, since_seq) for s in old_sources):
+            return
+        snap = page.aria_snapshot()
+        if item_nodes(snap) >= MIN_ITEMS:
+            if snap == last:
+                return
+            last = snap
+        if time.monotonic() >= deadline:
+            log.warning("page content did not settle within %.0f s; learning from it anyway",
+                        runner.FIRST_PASS_TIMEOUT_S)
+            return
+        page.wait(runner.FIRST_PASS_POLL_S)
+        started = time.monotonic()
+        guard(page)
+        deadline += time.monotonic() - started
+
+
 def first_pass_count(m: dict, page: ReadOnlyPage, pre_scroll_seq: int) -> int:
     """Complete items the map's source extracts as the runner's first pass would
     see them. Network: responses captured before the learner's scroll. DOM: the
@@ -199,9 +232,11 @@ def learn(store: Store, page: ReadOnlyPage, site: str, page_type: str, *, client
           guard: Guard | None = None) -> dict:
     guard = guard or (lambda p: None)
     url = sites.build_url(site, page_type, query=query, handle=handle)
+    start_seq = page.buffer.last_seq
     page.goto(url)
     guard(page)
     page.wait(LEARN_DELAY_S)
+    wait_for_page(page, start_seq, guard, old_map)
     # Fingerprint and first-pass baseline come from the same page state the
     # runner measures: after navigation and one wait, before any scroll.
     fingerprint_aria = page.aria_snapshot()
