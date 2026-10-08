@@ -313,3 +313,31 @@ issues were fixed on branch `claude/validate-fixes`:
    existing file (e.g. Brave or Edge), otherwise Playwright's executable as
    before; no production change. Documented in the README Tests section.
    Test: `test_browser.py::test_test_chrome_override`.
+5. **Cold start falsely reported a broken map** (branch `claude/cold-start-fix`).
+   Symptom: the first `run x search` after Brave was freshly started exited 4
+   in 7 s with "map broken: first pass found no items with ids"; an identical
+   run right after returned 80 items. With `ANTHROPIC_API_KEY` set this would
+   have spent a Claude call relearning a healthy map from a half-loaded page.
+   Cause: `runner.replay` did `goto` (domcontentloaded) + one `delay_s` wait
+   (2 s) and a single first pass; a cold browser's app had not requested the
+   feed yet, so the buffer and DOM were empty. The learner likewise
+   snapshotted after a fixed `LEARN_DELAY_S`.
+   Change: the runner polls (0.5 s) until any of the map's sources has
+   content — a response matching `network.url_regex` since navigation, or at
+   least one `dom.item` element — up to `FIRST_PASS_TIMEOUT_S = 15`, running
+   the challenge guard on every poll (challenge time does not count against
+   the ceiling). The first pass is tried up to `FIRST_PASS_ATTEMPTS = 2` times,
+   `delay_s` apart, each over all responses since navigation; `MapBroken` only
+   if every attempt fails. `learner.learn` calls `wait_for_page` before its
+   fingerprint, pre-scroll count and response samples: on self-heal it is
+   satisfied by the old map's sources having content; otherwise (and as a
+   fallback) by at least 3 item-role nodes in an aria snapshot that is
+   unchanged across one poll; same ceiling and guard. Scroll loop, delta,
+   drift, click and domain-lock logic unchanged.
+   Tests (`test_cold_start.py`; `feed.test` pages `/late`, `/late-dom`,
+   `/never`, `/late-challenge` whose script delays the feed or items by 3 s):
+   late feed and late DOM succeed; a feed that never arrives raises
+   `MapBroken` after the shortened timeout and self-heal is entered exactly
+   once; a checkpoint appearing during the wait triggers challenge handling
+   (Telegram mocked) and the run succeeds; learning the late-feed page saves a
+   valid map with `dry_run_items == 5`.
