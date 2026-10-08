@@ -2,9 +2,11 @@
 
 A local agent browser with interface memory. A model learns a page once and writes a site map; plain code replays it on every later run with no model calls, and only new items come back. The model is called again only when a map breaks.
 
+v2 adds a write layer built the same way: the model learns a composer once (an action map, rehearsed without posting), and plain code publishes **only items you approved in a queue**, each with a receipt read back from the platform.
+
 Targets: X, Reddit, Instagram, Facebook, LinkedIn, YouTube.
 
-Status: v1 built from [BUILD-BRIEF.md](BUILD-BRIEF.md).
+Status: v1 and v2 built from [BUILD-BRIEF.md](BUILD-BRIEF.md). v2 is validated offline only; live validation happens locally (see below).
 
 ## Usage
 
@@ -46,9 +48,16 @@ Sites and page types:
 | `facebook` | `page` (`--handle`), `feed` |
 | `linkedin` | `profile` (`--handle`), `feed`, `jobs` (`--query`) |
 
-Results go to stdout (`--json` gives a JSON array); logs go to stderr.
+Inbox page types (v2, read with `inbox`): `x` `notifications`, `messages`;
+`instagram` `messages`; `facebook` `notifications`; `linkedin`
+`notifications`, `messages`; `reddit` `inbox`.
+
+Results go to stdout (every command accepts `--json`); logs go to stderr.
 Exit codes: `0` ok, `1` error, `2` usage, `3` CAPTCHA not cleared within 10
-minutes, `4` map broken and no API key to relearn.
+minutes, `4` map broken and no API key to relearn, `5` publish refused (not
+attempted: not approved, content changed since approval, no action map, or a
+cap), `6` publish needs attention (attempted but not confirmed published; see
+`queue show <id>`).
 
 Environment:
 
@@ -58,7 +67,79 @@ Environment:
 | `AGENT_SURF_HOME` | `~/.agent-surf` | DB, learned maps, Chrome profile |
 | `AGENT_SURF_MODEL` | `claude-sonnet-5-5` | Learner model |
 | `ANTHROPIC_API_KEY` | | `learn` and self-heal only |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | | CAPTCHA ping; otherwise stderr |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | | CAPTCHA and missed-schedule pings; otherwise stderr |
+| `AGENT_SURF_ATTACH` | `cdp` | `devtools-active-port` (experimental, see below) |
+| `AGENT_SURF_PROFILE_DIR` | | Chrome profile dir for `devtools-active-port` |
+
+## v2: publishing
+
+```
+python -m agent_surf learn-action <site> post|reply|dm|comment [--target URL | --thread URL | --start URL]
+python -m agent_surf queue add <site> <action> [--text T] [--media F ...] [--target URL] [--thread URL] [--at ISO8601] [--missed skip|run|ask]
+python -m agent_surf queue list [--status S] | show <id> | approve <id> | approve --all-drafts | reject <id>
+python -m agent_surf publish <id>
+python -m agent_surf dispatch [--once]
+python -m agent_surf inbox <site> <page_type> [--json]
+python -m agent_surf receipts [--json]
+```
+
+Workflow:
+
+1. **Learn the composer once:** `learn-action x post`. Claude reads the
+   composer page and writes an action map; Agent Surf then *rehearses* it with
+   placeholder text, checks the submit button without clicking it, discards
+   the draft and confirms nothing was created. The map is saved only if that
+   rehearsal is clean. Replies and comments need `--target <post URL>`, DMs
+   `--thread <conversation URL>`.
+2. **Queue content:** `queue add x post --text "..." --media photo.jpg --at 2026-11-01T09:00`.
+   Items start as drafts. You (or your own tooling) write the text; Agent Surf
+   never generates it.
+3. **Approve:** `queue show <id>`, then `queue approve <id>`. Approval freezes
+   the content: a hash of the text and of every media file's bytes. If anything
+   changes afterwards, publishing refuses and the item needs re-approval.
+4. **Publish:** `publish <id>` now, or leave `dispatch` running to publish
+   approved items when they are due. Without `--at`, an approved item is due
+   immediately.
+5. **Receipts:** an item becomes `published` only when the platform's own
+   create response returns a post id with no errors **and** the post's
+   permalink shows your text. Otherwise it is `needs_attention` with the
+   evidence; nothing is ever retried blindly. `receipts` lists them.
+
+Queue states: `draft`, `approved`, `publishing`, `published`, `failed`,
+`needs_attention`, `rejected`. Only `approved` items are published.
+
+**Caps** come from each action map's `limits` (`per_hour`, `per_day` <= 200,
+`min_spacing_s` >= 30); every submit counts. A capped item stays approved and
+goes out on a later tick. Pacing is fixed: no random delays.
+
+**Missed schedules:** if the machine slept or `dispatch` was not running when
+an item was due, its `--missed` policy applies when dispatch resumes: `skip`
+(mark failed), `run` (publish once now) or `ask` (default: needs attention and
+a Telegram ping).
+
+**If the outcome is unknown** (crash or timeout after submit), Agent Surf looks
+for the post on your account through the reading side (the action map's
+`lookup` page, which needs a reading map) and records the receipt if found.
+It never submits the same item twice on its own.
+
+### Attach modes
+
+- Default: `AGENT_SURF_CDP_URL`, Chrome started with `agent-surf chrome`
+  (a dedicated profile).
+- **Experimental:** `AGENT_SURF_ATTACH=devtools-active-port` with
+  `AGENT_SURF_PROFILE_DIR=<your Chrome profile dir>` attaches to the Chrome 144+
+  remote-debugging toggle (chrome://inspect/#remote-debugging) on an everyday
+  profile by reading its `DevToolsActivePort` file. Tested offline only.
+
+Agent Surf always opens its own tabs and closes them; it never reads,
+navigates or closes your other tabs.
+
+### Validating v2 live (locally)
+
+All v2 tests run offline against a synthetic site. Before relying on it, on
+your own machine and with an account you can lose: run `learn-action` for one
+site, read the saved `<site>.action-<action>.v1.json` in `$AGENT_SURF_HOME/maps/`, queue one
+harmless post, approve it, `publish` it, and confirm the receipt's permalink.
 
 ### Maps and clicks
 
@@ -110,9 +191,12 @@ fails if any fixture contains cookies, auth headers or token-shaped headers.
 ## Ground rules
 
 - Runs against your own Chrome, started with a dedicated profile. Agent Surf never handles passwords.
-- Read-only: it navigates, scrolls and reads. It does not type, post or submit.
+- Reading is read-only: it navigates, scrolls and reads.
+- Publishing (v2) types only the text and attaches only the files of a queue item you approved, and clicks only an allowlisted submit button (Post, Tweet, Share, Publish, Reply, Send, Comment, per action). It never likes, follows, reposts or deletes.
+- No anti-detection of any kind: no spoofing, stealth plugins, random delays, proxy rotation or CAPTCHA solving.
+- One user, their own accounts, in their own browser.
 - CAPTCHAs are never bypassed. Agent Surf pauses and asks you to solve them.
-- Logged-in scraping can breach a platform's terms and get accounts banned. Use accounts you can lose.
+- Logged-in scraping and automated posting can breach a platform's terms and get accounts banned. Use accounts you can lose.
 
 ## License
 

@@ -365,3 +365,117 @@ issues were fixed on branch `claude/validate-fixes`:
    Not verifiable from the cloud: Windows and live sites (CLAUDE.md forbids
    live requests here). Live check on the user's machine: freshly start the
    browser, then `run x search --query ...` must not exit 4.
+
+## Agent Surf v2: the write layer
+Built on branch `claude/agent-surf-v2` (base `claude/cold-start-fix`, so the
+cold-start wait of Fix 5/6 is already in). v1 learns a page once and replays it
+with zero model calls; v2 does the same for composers. All v1 rules still apply
+except the read-only rule, which is replaced by the publishing boundary below.
+
+### Publishing boundary (enforced in code)
+- Text typed and files attached come only from the approved queue item's
+  payload. Action-map values are placeholders (`{text}`, `{media}`,
+  `{target_url}`, `{thread_url}`), never content; the model never supplies text.
+- Publishing reads only from the queue (`publisher.publish`). The reading side
+  (runner, learner, inbox, sitemap, browser...) imports nothing from the writing
+  side; `tests/test_boundary.py` checks this structurally.
+- Final submit only through `Submitter.submit`, on a target whose label is in
+  both the map's allowlist and the per-action list in code (post: Post/Tweet/
+  Share/Publish; reply: Reply/Post; dm: Send; comment: Comment/Post/Reply).
+- Ops: navigate (site domains only), click (stored target), type (queue text
+  only), attach (queue files only), press (Enter/Escape/Tab), wait_for, submit,
+  discard. Additionally: once text is in the composer, Enter and clicks on
+  submit-labelled controls are refused (they could publish outside submit), and
+  destructive-looking controls (delete, block, report, follow, like, repost...)
+  are never clicked.
+- Challenges: the guard runs before navigation, after every step and before
+  submit; a challenge is never clicked (detect, pause, notify, wait).
+- No anti-detection: no spoofing, stealth, jitter, proxy rotation or CAPTCHA
+  solving. Pacing is fixed caps. One user, their own accounts and browser.
+
+### Action maps (`actionmap.py`)
+One JSON file per (site, action), `<site>.action-<action>.v<N>.json` beside the
+reading maps, versions in the `action_maps` table. Keys: site, action, version,
+start {url_template, requires}, steps [{op, target, value, state, preview}],
+submit {target, label_allowlist}, discard [steps], dismiss [steps] (optional,
+overlay close), confirm {network {url_regex, method, id_path, error_path},
+dom {target, state}}, permalink_template (`{id}`), limits {per_hour, per_day
+<= 200, min_spacing_s >= 30}, lookup {page_type, handle?, query?} (optional,
+for unknown-outcome recovery), learned_at, learned_by. A target is
+{role, name, testid, css}; resolution tries role+name, then testid, then css,
+and the first visible match wins (hidden file inputs allowed for attach).
+`validate_action_map()` rejects unknown keys/ops, non-placeholder values,
+off-domain URLs, allowlists wider than the code's, and limits above ceilings.
+Decisions beyond the brief: `dismiss`, `preview` and `lookup` keys; `value`
+must be exactly one placeholder; attach steps are skipped when the item has no
+media.
+
+### Executor (`executor.py`)
+Text entry: fill() -> clear + keyboard.type() -> insertText(); accepted only
+when the composer shows exactly the payload text and submit is enabled. Media:
+set_input_files on a (hidden) file input, else expect_file_chooser around the
+attach click, then the map's preview. Intercepted clicks: dismiss (map steps or
+Escape), re-resolve, retry once. No networkidle waits. Step targets wait up to
+`STEP_TIMEOUT_S = 15` (cold-start composers). `StepRunner` (rehearsal) has no
+submit and aborts the create endpoint on its tab.
+
+### Learning (`action_learner.py`, `learn-action`)
+Opens the composer (`sites.ACTION_START` for posts; `--target`/`--thread` for
+replies, comments, DMs), waits for a text box, sends the aria snapshot and
+reduced JSON responses as untrusted data, validates the returned map, then
+rehearses it with code-supplied placeholder text (and a stdlib 1x1 PNG if the
+map attaches media): every step, a check of the submit target without
+clicking, discard, composer closed, no create request. Saved only if clean.
+
+### Queue (`outbox.py`, table `queue`)
+States: draft -> approved | rejected; approved -> publishing | rejected |
+failed (missed) | needs_attention; publishing -> published | failed |
+needs_attention; needs_attention / failed -> approved (a human re-approves) |
+rejected; published and rejected are terminal. Illegal transitions raise.
+Approval stores `content_hash` = sha256 of the canonical payload plus every
+media file's bytes; media must be existing regular files at approval and at
+publish. `scheduled_at` is stored in UTC (input without offset = local time);
+`missed_policy` skip|run|ask (default ask).
+
+### Publish and receipts (`publisher.py`)
+Only approved items whose hash matches; caps from `dispatch_log` (every submit
+counts). Receipt = the create response's id at id_path with nothing at
+error_path (GraphQL 200-with-errors is not published); DOM confirm only when
+the map has no network block (id from the permalink link). Then the permalink
+must show the approved text (whitespace/emoji normalised) before `published`.
+Otherwise `needs_attention` with evidence (incl. an aria delta of the page
+after submit). Unknown outcome (submit click error, no confirmation, crash ->
+`recover_publishing`): the account is checked through the reading side (map
+`lookup` page + its reading map); found -> receipt, else needs_attention;
+never resubmitted. Self-heal: a step failing before submit discards the draft,
+relearns once in rehearsal mode and retries once; a second failure ->
+needs_attention.
+
+### Scheduler (`dispatcher.py`, `dispatch [--once]`)
+Ticks every 30 s; publishes due approved items (scheduled_at <= now or none)
+one by one through the publisher. A gap since the stored last tick
+(`dispatcher_state`) of more than 3 ticks, or no previous tick, is a wake:
+items that came due in the gap get their missed policy (skip -> failed
+"missed"; run -> publish once; ask -> needs_attention + notifier ping).
+Restart-safe; dispatch and completion recorded separately in `dispatch_log`.
+
+### Inbox (`inbox.py`, `inbox <site> <page_type>`)
+The response buffer also captures WebSocket frames (str and bytes; kept when
+they decode as JSON). Reading maps accept `"source": "websocket"` (url_regex on
+the socket URL, same paths). Inbox page types: x notifications/messages,
+instagram messages, facebook notifications, linkedin notifications/messages,
+reddit inbox. `sitemap.aria_delta()` returns only changed nodes.
+
+### Attach modes (`browser.py`)
+`AGENT_SURF_CDP_URL` (default). Experimental: `AGENT_SURF_ATTACH=
+devtools-active-port` + `AGENT_SURF_PROFILE_DIR` reads the profile's
+`DevToolsActivePort` and attaches to `ws://127.0.0.1:<port><path>` (Chrome
+144+ chrome://inspect toggle on an everyday profile). Every run opens its own
+tabs and closes them; the user's tabs are never touched.
+
+### Experimental / validated only offline
+DevToolsActivePort attach against a real Chrome 144+ profile; every real
+site's composer (no action map has been learned against a live site); the
+default composer URLs in `sites.ACTION_START`; live WebSocket inboxes; real
+GraphQL create responses and permalinks; account lookup through real
+profile pages. All of this needs local live validation.
