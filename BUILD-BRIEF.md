@@ -366,6 +366,51 @@ issues were fixed on branch `claude/validate-fixes`:
    live requests here). Live check on the user's machine: freshly start the
    browser, then `run x search --query ...` must not exit 4.
 
+7. **Discard check matched a look-alike composer** (v2 live, X; branch
+   `claude/v2-live-fixes`). Symptom: `learn-action x post` run #2 failed with
+   "step discard[1]: still visible: textbox 'Post text'"; run #1 had passed only
+   by a race. Cause: the discard `wait_for ... hidden` and the rehearsal's final
+   check resolved the text box page-wide; after a correct discard X navigates to
+   /home, whose inline composer has the same role and name. Change: every target
+   a run resolves is pinned to its element; optional map key `composer {target}`
+   pins the container that holds the text box, and type, attach and submit
+   resolve only inside it (StepFailed if it is missing or gone, never a
+   page-wide fallback); hidden waits and `composer_closed()` pass when the pinned
+   element is detached/hidden or the pinned container is gone, never because of
+   a different element elsewhere. The learner prompt asks for `composer` and for
+   discard to end by waiting for the container to be hidden. Tests
+   (`test_composer_scope.py`; compose.test dialog over an inline composer with
+   the same name, discard navigating to the inline page, 500 ms race variant):
+   the old page-wide check would fail (asserted); rehearsal passes with and
+   without `composer`; a missing or vanished container fails with nothing
+   typed; publish types into and submits from the dialog only.
+8. **Text-only posts refused by a map that required media** (v2 live, X).
+   Symptom: publishing "hello world" was refused: "the queue item has no media,
+   which this action map requires". Cause: rehearsal always attached a PNG when
+   the map had an attach step and nothing said media was optional, so the model
+   put `media` in `start.requires`; the text-only path was never rehearsed.
+   Change: `sites.media_required(site, action)` (instagram post True, everything
+   else False); `validate_action_map` rejects `media` in requires unless
+   required, and when required demands it plus an attach step; the prompt states
+   the rule; rehearsal runs a text-only pass that must reach an enabled submit,
+   then a media pass if the map has an attach step (media required: media pass
+   only); every pass discards, closes the composer and sends no create request.
+   A stored map that breaks the rule fails to load with a relearn hint. Tests
+   (`test_media_rule.py`): validator cases, prompt wording, both passes (no file
+   in pass 1), media-only pass, a composer whose Post needs media fails pass 1,
+   text-only publish with an optional attach step gets a receipt and read-back,
+   the old X map must be relearned.
+9. **Failed learning left no evidence** (v2 live, X). Change: after the model
+   returned a map, any ActionLearnError writes
+   `<AGENT_SURF_HOME>/debug/<UTC>-<site>-<action>/` (rejected-map.json,
+   error.txt, notes.txt, aria-before.yaml, aria-after.yaml; no cookies,
+   headers, response bodies or non-synthetic typed text); the CLI prints the
+   path; `learn-action --keep-debug` writes it on success (learned-map.json).
+   Never inside the repository (refused in code; `debug/` gitignored). Tests
+   (`test_learn_debug.py`): evidence on rehearsal and validation failures,
+   none without a map, success only with --keep-debug, refused inside the repo,
+   CLI prints the path, every file passes the scrub guard's text checks.
+
 ## Agent Surf v2: the write layer
 Built on branch `claude/agent-surf-v2` (base `claude/cold-start-fix`, so the
 cold-start wait of Fix 5/6 is already in). v1 learns a page once and replays it
@@ -409,6 +454,15 @@ off-domain URLs, allowlists wider than the code's, and limits above ceilings.
 Decisions beyond the brief: `dismiss`, `preview` and `lookup` keys; `value`
 must be exactly one placeholder; attach steps are skipped when the item has no
 media.
+After live use (Fixes 7-8): optional `composer {target}` (the container,
+typically the [role=dialog], holding the text box and submit): type, attach and
+submit resolve only inside it, and discard should end with a `wait_for` that
+the composer is hidden. Every resolved target is pinned to its element for the
+run; hidden checks never count a look-alike elsewhere on the page. Media:
+`sites.media_required(site, action)` (only instagram post is True); `media` may
+be in `start.requires` only when required, and then an attach step is
+mandatory. Rehearsal: text-only pass (must reach an enabled submit), then a
+media pass if there is an attach step; media-required: media pass only.
 
 ### Executor (`executor.py`)
 Text entry: fill() -> clear + keyboard.type() -> insertText(); accepted only

@@ -74,7 +74,7 @@ Environment:
 ## v2: publishing
 
 ```
-python -m agent_surf learn-action <site> post|reply|dm|comment [--target URL | --thread URL | --start URL]
+python -m agent_surf learn-action <site> post|reply|dm|comment [--target URL | --thread URL | --start URL] [--keep-debug]
 python -m agent_surf queue add <site> <action> [--text T] [--media F ...] [--target URL] [--thread URL] [--at ISO8601] [--missed skip|run|ask]
 python -m agent_surf queue list [--status S] | show <id> | approve <id> | approve --all-drafts | reject <id>
 python -m agent_surf publish <id>
@@ -90,7 +90,12 @@ Workflow:
    placeholder text, checks the submit button without clicking it, discards
    the draft and confirms nothing was created. The map is saved only if that
    rehearsal is clean. Replies and comments need `--target <post URL>`, DMs
-   `--thread <conversation URL>`.
+   `--thread <conversation URL>`. Media is optional except for Instagram
+   posts: the rehearsal first proves a text-only post reaches an enabled Post
+   button, then (if the composer can attach photos) a post with a synthetic
+   image. If learning fails, the evidence (rejected map, error, notes, page
+   snapshots) is written to `$AGENT_SURF_HOME/debug/<time>-<site>-<action>/`
+   and the path is printed; `--keep-debug` writes it on success too.
 2. **Queue content:** `queue add x post --text "..." --media photo.jpg --at 2026-11-01T09:00`.
    Items start as drafts. You (or your own tooling) write the text; Agent Surf
    never generates it.
