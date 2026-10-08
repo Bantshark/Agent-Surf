@@ -361,6 +361,7 @@ class StepRunner:
     def _attach(self, step: dict, where: Any) -> None:
         files = self.payload.get("media") or []
         if not files:
+            self.notes.append(f"step {where}: no media in this item; attach skipped")
             return  # optional: nothing to attach
         r = self._resolve(step["target"], where, scope="composer", file_input=True)
         is_input = r.locator.evaluate("e => e.tagName === 'INPUT' && e.type === 'file'")
@@ -378,6 +379,7 @@ class StepRunner:
             raise StepFailed(where, f"attach failed ({type(e).__name__})") from None
         if step.get("preview"):
             self._resolve(step["preview"], f"{where}.preview")
+        self.notes.append(f"step {where}: attached {len(files)} file(s)")
 
     def _navigate(self, step: dict, where: Any) -> None:
         key = (step.get("value") or "").strip("{}")

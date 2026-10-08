@@ -49,6 +49,19 @@ INBOX_PAGE_TYPES: dict[str, set[str]] = {
     "reddit": {"inbox"},
 }
 
+# Whether a (site, action) cannot publish without media. Instagram feed posts
+# need a photo or video; everything else is text-first. Unknown -> False.
+MEDIA_REQUIRED: dict[tuple[str, str], bool] = {
+    ("instagram", "post"): True,
+    ("x", "post"): False, ("facebook", "post"): False, ("linkedin", "post"): False,
+    ("reddit", "post"): False,
+}
+
+
+def media_required(site: str, action: str) -> bool:
+    return MEDIA_REQUIRED.get((site, action), False)
+
+
 # Where learn-action opens a composer for a new post. Replies, comments and DMs
 # start from the queue item's / learn-action's --target or --thread URL.
 ACTION_START: dict[str, dict[str, str]] = {

@@ -121,7 +121,11 @@ def wait_for_composer(page: ActionPage, since_seq: int, guard: Any) -> None:
 def build_action_prompt(site: str, action: str, url: str, aria: str, responses: list,
                         old_map: dict | None = None, broken_reason: str | None = None) -> str:
     aria = aria[:learner.ARIA_BUDGET] + ("\n...[truncated]" if len(aria) > learner.ARIA_BUDGET else "")
-    parts = [f"site: {site}", f"action: {action}", f"composer URL: {url}", ""]
+    media = ("REQUIRED: every item has at least one photo or video; put \"media\" in "
+             "start.requires and include an attach step" if sites.media_required(site, action) else
+             "OPTIONAL: do NOT put \"media\" in start.requires; include an attach step if the "
+             "composer can add photos (it is skipped for items without media)")
+    parts = [f"site: {site}", f"action: {action}", f"composer URL: {url}", f"media: {media}", ""]
     if old_map is not None:
         parts += ["The previous action map stopped working"
                   + (f" ({broken_reason})" if broken_reason else "") + ". It is a hint only:",
@@ -134,38 +138,53 @@ def build_action_prompt(site: str, action: str, url: str, aria: str, responses: 
     return "\n".join(parts)
 
 
-def rehearse(page: ActionPage, m: dict, payload_urls: dict, guard: Any) -> list[str]:
-    """Run the map with placeholder content up to (not including) submit, then
-    discard. Raises ActionLearnError unless the composer closed and no create
-    request was sent. Returns the executor's notes."""
-    with tempfile.TemporaryDirectory(prefix="agent-surf-rehearsal-") as tmp:
-        payload = dict(payload_urls, text=REHEARSAL_TEXT.format(token=secrets.token_hex(3)))
-        if any(s.get("op") == "attach" for s in m["steps"]):
-            payload["media"] = [str(synthetic_png(Path(tmp) / "rehearsal.png"))]
-        run = StepRunner(page, m, payload, guard)
-        first_request = len(page.requests)
+def _rehearse_pass(page: ActionPage, m: dict, payload: dict, guard: Any, name: str) -> list[str]:
+    """One pass: steps up to (not including) submit, a submit check without
+    clicking, then discard; the composer must be closed and no create request
+    sent. Returns the executor's notes, prefixed with the pass name."""
+    run = StepRunner(page, m, payload, guard)
+    first_request = len(page.requests)
+    try:
+        run.start()
+        run.run_steps()
+        label = run.submit_target_ok()
+        run.notes.append(f"submit target found and enabled: {label!r} (not clicked)")
+        run.discard()
+    except (StepFailed, Refused, sites.DomainRefused) as e:
         try:
-            run.start()
-            run.run_steps()
-            label = run.submit_target_ok()
-            run.notes.append(f"submit target found and enabled: {label!r} (not clicked)")
-            run.discard()
-        except (StepFailed, Refused, sites.DomainRefused) as e:
-            try:
-                run.discard()  # best effort: leave no draft behind
-            except Exception:
-                pass
-            raise ActionLearnError(f"rehearsal failed: {e}") from e
-        if not run.composer_closed():  # the composer this run used, not a look-alike behind it
-            raise ActionLearnError("rehearsal failed: the composer is still open after discard")
-        net = m["confirm"].get("network")
-        if net:
-            rx = re.compile(net["url_regex"])
-            sent = [u for meth, u in page.requests[first_request:]
-                    if meth == net.get("method", "POST") and rx.search(u)]
-            if sent:
-                raise ActionLearnError("rehearsal failed: a create request was sent")
-        return run.notes
+            run.discard()  # best effort: leave no draft behind
+        except Exception:
+            pass
+        raise ActionLearnError(f"rehearsal failed ({name}): {e}") from e
+    if not run.composer_closed():  # the composer this run used, not a look-alike behind it
+        raise ActionLearnError(f"rehearsal failed ({name}): the composer is still open after discard")
+    net = m["confirm"].get("network")
+    if net:
+        rx = re.compile(net["url_regex"])
+        if any(meth == net.get("method", "POST") and rx.search(u) for meth, u in page.requests[first_request:]):
+            raise ActionLearnError(f"rehearsal failed ({name}): a create request was sent")
+    return [f"{name}: {n}" for n in run.notes]
+
+
+def rehearse(page: ActionPage, m: dict, payload_urls: dict, guard: Any) -> list[str]:
+    """Rehearse with code-supplied content, never submitting. When media is
+    optional for the site/action: pass 1 is text-only (attach skipped) and must
+    reach an enabled submit; pass 2 attaches a synthetic PNG if the map has an
+    attach step. When media is required, only the media pass runs."""
+    text = REHEARSAL_TEXT.format(token=secrets.token_hex(3))
+    has_attach = any(s.get("op") == "attach" for s in m["steps"])
+    notes: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="agent-surf-rehearsal-") as tmp:
+        png = [str(synthetic_png(Path(tmp) / "rehearsal.png"))]
+        if not sites.media_required(m["site"], m["action"]):
+            notes += _rehearse_pass(page, m, dict(payload_urls, text=text), guard, "pass 1 (text only)")
+            if has_attach:
+                notes += _rehearse_pass(page, m, dict(payload_urls, text=text, media=png), guard,
+                                        "pass 2 (with media)")
+        else:
+            notes += _rehearse_pass(page, m, dict(payload_urls, text=text, media=png), guard,
+                                    "media pass (media required)")
+    return notes
 
 
 def learn_action(store: Store, page: ActionPage, site: str, action: str, *, client: Any, model: str,

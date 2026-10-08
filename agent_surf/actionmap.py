@@ -185,6 +185,16 @@ def validate_action_map(m: Any) -> list[str]:
         _check_steps(m["dismiss"], "dismiss", ("click", "press"), problems, set())
     for need in sorted(needs - {"media"} - set(requires)):
         problems.append(f"start.requires: must include {need} (used by the map)")
+    if site is not None and action in ACTIONS and isinstance(m.get("steps"), list):
+        has_attach = any(isinstance(s, dict) and s.get("op") == "attach" for s in m["steps"])
+        if sites.media_required(site.name, action):
+            if "media" not in requires:
+                problems.append(f"start.requires: must include media ({site.name} {action} needs media)")
+            if not has_attach:
+                problems.append(f"steps: needs an attach step ({site.name} {action} needs media)")
+        elif "media" in requires:
+            problems.append(f"start.requires: media is optional for {site.name} {action}; "
+                            "do not require it (attach steps are skipped when there is none)")
 
     submit = m.get("submit")
     if "submit" in m:
@@ -317,7 +327,12 @@ def load_action_map(path: str | Path) -> dict:
 def current_action_map(store: Store, site: str, action: str) -> dict | None:
     row = store.conn.execute("SELECT path FROM action_maps WHERE site = ? AND action = ?"
                              " ORDER BY version DESC LIMIT 1", (site, action)).fetchone()
-    return None if row is None else load_action_map(row["path"])
+    if row is None:
+        return None
+    try:
+        return load_action_map(row["path"])
+    except ActionMapError as e:
+        raise ActionMapError(f"{e}. Relearn it: agent-surf learn-action {site} {action}") from None
 
 
 # ---------------------------------------------------------------------------

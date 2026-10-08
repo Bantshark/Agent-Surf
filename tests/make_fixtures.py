@@ -283,7 +283,9 @@ COMPOSE_JS = r"""
 const cfg = __CFG__;
 let state = '', media = 0;
 const $ = (id) => document.getElementById(id);
-function update() { $('submit').disabled = state.trim() === '' && media === 0; }
+function update() {
+  $('submit').disabled = cfg.media_only ? media === 0 : (state.trim() === '' && media === 0);
+}
 function closeComposer() { state = ''; media = 0; $('app').innerHTML = '<p>Composer closed</p>'; }
 function caretToEnd(el) {
   const r = document.createRange(); r.selectNodeContents(el); r.collapse(false);
@@ -359,8 +361,10 @@ OVERLAY_HTML = ('<div id="overlay" role="dialog" aria-label="Turn on notificatio
                 'inset:0;background:rgba(0,0,0,.4);z-index:10"><p>Turn on notifications?</p></div>')
 
 
-def compose_page(editor="input", media="hidden", overlay=False, late_ms=0, injection=False):
-    cfg = json.dumps({"editor": editor, "media": media, "overlay": overlay, "late_ms": late_ms})
+def compose_page(editor="input", media="hidden", overlay=False, late_ms=0, injection=False,
+                 media_only=False):
+    cfg = json.dumps({"editor": editor, "media": media, "overlay": overlay, "late_ms": late_ms,
+                      "media_only": media_only})
     return ('<!doctype html><html><head><meta charset="utf-8"><title>Compose Test</title>'
             '<style>#editor{min-height:60px;border:1px solid #888}</style></head><body><main>'
             '<h1>Compose</h1>' + (INJECTION_HTML if injection else '') + '<div id="app"></div></main>'
@@ -447,6 +451,7 @@ COMPOSE_PAGES = {
     "/compose-chooser": compose_page(media="chooser"),
     "/compose-late": compose_page(late_ms=3000),
     "/compose-injection": compose_page(injection=True),
+    "/compose-media-only": compose_page(media_only=True),   # Post enables only with media
     "/compose-modal": modal_page(inline="now"),
     "/compose-modal-only": modal_page(),
     "/compose-modal-race": modal_page(home="/home-inline-late"),
