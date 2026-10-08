@@ -12,7 +12,7 @@ import sys
 from typing import Any
 
 from agent_surf import challenge, config, sitemap, sites
-from agent_surf.browser import BrowserError, BrowserSession, chrome_instructions
+from agent_surf.browser import BrowserError, BrowserSession, cdp_endpoint, chrome_instructions
 from agent_surf.store import Store
 
 log = logging.getLogger("agent_surf")
@@ -93,7 +93,7 @@ def cmd_learn(cfg: config.Config, args: argparse.Namespace) -> int:
     if client is None:
         log.error("learn needs ANTHROPIC_API_KEY in the environment")
         return EXIT_ERROR
-    with Store(cfg.db_path) as store, BrowserSession(cfg.cdp_url) as session:
+    with Store(cfg.db_path) as store, BrowserSession(cdp_endpoint(cfg)) as session:
         m = learner.learn(store, session.new_page(site), args.site, args.page_type, client=client,
                           model=cfg.model, maps_dir=cfg.maps_dir, query=args.query,
                           handle=args.handle, guard=challenge.make_guard())
@@ -109,7 +109,7 @@ def cmd_run(cfg: config.Config, args: argparse.Namespace) -> int:
     with Store(cfg.db_path) as store:
         runner.load_current_map(store, args.site, args.page_type)  # refuse before touching Chrome
         client = make_client(cfg)
-        with BrowserSession(cfg.cdp_url) as session:
+        with BrowserSession(cdp_endpoint(cfg)) as session:
             try:
                 result = learner.run_with_heal(
                     store, session.new_page(site), args.site, args.page_type, client=client,

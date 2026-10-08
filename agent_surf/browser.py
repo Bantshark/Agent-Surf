@@ -289,15 +289,56 @@ class ReadOnlyPage:
 
 
 # ---------------------------------------------------------------------------
+# Attach modes
+
+def read_devtools_active_port(profile_dir: str | Path) -> str:
+    """CDP websocket URL from a profile's DevToolsActivePort file (line 1: port,
+    line 2: browser websocket path). Chrome writes it when remote debugging is on
+    for that profile, e.g. via chrome://inspect/#remote-debugging (Chrome 144+)."""
+    path = Path(profile_dir) / "DevToolsActivePort"
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        raise BrowserError(
+            f"{path} not found: turn on remote debugging for this profile "
+            "(chrome://inspect/#remote-debugging in Chrome 144+) or use AGENT_SURF_CDP_URL") from None
+    except OSError as e:
+        raise BrowserError(f"cannot read {path}: {type(e).__name__}") from None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2 or not lines[0].isdigit() or not lines[1].startswith("/"):
+        raise BrowserError(f"{path} is malformed (expected a port line and a /devtools/... path line)")
+    port = int(lines[0])
+    if not 1 <= port <= 65535:
+        raise BrowserError(f"{path} has an invalid port")
+    return f"ws://127.0.0.1:{port}{lines[1]}"
+
+
+def cdp_endpoint(cfg: Any) -> str:
+    """Where to attach: AGENT_SURF_CDP_URL (default mode ``cdp``) or, in the
+    experimental ``devtools-active-port`` mode, the profile's DevToolsActivePort."""
+    if cfg.attach == "cdp":
+        return cfg.cdp_url
+    if cfg.attach == "devtools-active-port":
+        if cfg.profile_dir is None:
+            raise BrowserError("AGENT_SURF_ATTACH=devtools-active-port needs AGENT_SURF_PROFILE_DIR")
+        return read_devtools_active_port(cfg.profile_dir)
+    raise BrowserError(f"unknown AGENT_SURF_ATTACH {cfg.attach!r}; use cdp or devtools-active-port")
+
+
+# ---------------------------------------------------------------------------
 # CDP session
 
 class BrowserSession:
-    """Attach to the user's running Chrome over CDP and use its default context."""
+    """Attach to the user's running Chrome over CDP and use its default context.
+
+    Tab hygiene: every page Agent Surf uses is a new tab it opened itself, and
+    each is closed on exit. The user's existing tabs are never navigated, read
+    or closed."""
 
     def __init__(self, cdp_url: str):
         self.cdp_url = cdp_url
         self._pw = None
-        self._pages: list[ReadOnlyPage] = []
+        self._tabs: list[Any] = []
 
     def __enter__(self) -> "BrowserSession":
         from playwright.sync_api import Error as PlaywrightError, sync_playwright
@@ -316,13 +357,20 @@ class BrowserSession:
         self.context = self.browser.contexts[0]
         return self
 
+    def open_tab(self) -> Any:
+        """A new tab owned by this session (closed on exit)."""
+        tab = self.context.new_page()
+        self._tabs.append(tab)
+        return tab
+
     def new_page(self, site: sites.Site) -> ReadOnlyPage:
-        page = ReadOnlyPage(self.context.new_page(), site)
-        self._pages.append(page)
-        return page
+        return ReadOnlyPage(self.open_tab(), site)
 
     def __exit__(self, *exc: object) -> None:
-        for p in self._pages:
-            p.close()
+        for tab in self._tabs:
+            try:
+                tab.close()
+            except Exception:
+                pass
         if self._pw is not None:
             self._pw.stop()  # disconnects; the user's Chrome keeps running

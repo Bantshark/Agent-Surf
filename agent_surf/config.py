@@ -17,11 +17,16 @@ DEFAULT_HOME = "~/.agent-surf"
 DEFAULT_MODEL = "claude-sonnet-5-5"
 
 
+ATTACH_MODES = ("cdp", "devtools-active-port")
+
+
 @dataclass(frozen=True)
 class Config:
     cdp_url: str
     home: Path
     model: str
+    attach: str = "cdp"                 # AGENT_SURF_ATTACH
+    profile_dir: Path | None = None     # AGENT_SURF_PROFILE_DIR (devtools-active-port mode)
 
     @property
     def db_path(self) -> Path:
@@ -49,6 +54,8 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         cdp_url=e.get("AGENT_SURF_CDP_URL") or DEFAULT_CDP_URL,
         home=Path(e.get("AGENT_SURF_HOME") or DEFAULT_HOME).expanduser(),
         model=e.get("AGENT_SURF_MODEL") or DEFAULT_MODEL,
+        attach=e.get("AGENT_SURF_ATTACH") or "cdp",
+        profile_dir=Path(e["AGENT_SURF_PROFILE_DIR"]).expanduser() if e.get("AGENT_SURF_PROFILE_DIR") else None,
     )
 
 
