@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS dispatch_log (
     completed_at TEXT,
     outcome TEXT
 );
+-- v2: dispatcher state (last tick), so wake/restart detection survives restarts
+CREATE TABLE IF NOT EXISTS dispatcher_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 -- v2: publishing queue (see outbox.py)
 CREATE TABLE IF NOT EXISTS queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
