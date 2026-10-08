@@ -29,6 +29,7 @@ HEALTH_MIN_ITEMS = 0.5    # first pass below this share of the dry-run count -> 
 HEALTH_MIN_COMPLETE = 0.8 # below this share of items with all required fields -> warn
 FIRST_PASS_TIMEOUT_S = 15.0  # ceiling on waiting for a cold page's feed or items to appear
 FIRST_PASS_POLL_S = 0.5
+FIRST_PASS_QUIET_S = 5.0     # no response of any kind and no DOM change this long: stop waiting
 FIRST_PASS_ATTEMPTS = 2      # first-pass tries (delay_s apart) before MapBroken
 
 
@@ -113,24 +114,52 @@ def content_ready(m: dict, source: str, page: ReadOnlyPage, since_seq: int) -> b
     return bool(page.dom_items(m["dom"]))
 
 
+class QuietTracker:
+    """A page is quiet once no response of any type has arrived and its aria
+    snapshot has not changed for ``FIRST_PASS_QUIET_S``. A loading app keeps
+    fetching scripts, images or JSON, or changes its DOM, so it is not quiet."""
+
+    def __init__(self, page: ReadOnlyPage):
+        self.page = page
+        self.state: tuple | None = None
+        self.since = time.monotonic()
+
+    def reset(self) -> None:
+        self.state, self.since = None, time.monotonic()
+
+    def quiet(self) -> bool:
+        state = (self.page.buffer.activity, self.page.aria_snapshot())
+        if state != self.state:
+            self.state, self.since = state, time.monotonic()
+            return False
+        return time.monotonic() - self.since >= FIRST_PASS_QUIET_S
+
+
 def wait_for_content(m: dict, page: ReadOnlyPage, since_seq: int, guard: Guard,
                      timeout_s: float | None = None) -> str | None:
     """Poll until any of the map's sources has content; return that source, or
-    None after the timeout. Runs the challenge guard on every poll; time spent
-    in a challenge does not count against the timeout."""
+    None once the page has gone quiet without it or the timeout passes. Runs the
+    challenge guard on every poll; time spent in a challenge counts neither
+    against the timeout nor as quiet."""
     timeout_s = FIRST_PASS_TIMEOUT_S if timeout_s is None else timeout_s
     sources = [m["source"]] + [s for s in sitemap.SOURCES if s != m["source"] and s in m]
     deadline = time.monotonic() + timeout_s
+    tracker = QuietTracker(page)
     while True:
         for source in sources:
             if content_ready(m, source, page, since_seq):
                 return source
+        if tracker.quiet():
+            log.warning("page went quiet with no content from %s", " or ".join(sources))
+            return None
         if time.monotonic() >= deadline:
             log.warning("no content from %s after %.0f s", " or ".join(sources), timeout_s)
             return None
         page.wait(FIRST_PASS_POLL_S)
         started = time.monotonic()
         guard(page)
+        if time.monotonic() - started > FIRST_PASS_POLL_S:
+            tracker.reset()
         deadline += time.monotonic() - started
 
 

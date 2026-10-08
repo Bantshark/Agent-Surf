@@ -181,8 +181,21 @@ def dry_run(m: dict, page: ReadOnlyPage) -> tuple[int, list[str]]:
     return main, warnings
 
 
+# Item-role nodes inside these landmarks (menus, sidebars, header, footer)
+# do not count as page content for the learner's wait.
+CHROME_LANDMARKS = frozenset({"navigation", "complementary", "banner", "contentinfo"})
+
+
 def item_nodes(snapshot: str) -> int:
-    return sum(1 for _, role in sitemap._aria_roles(snapshot) if role in sitemap.ITEM_ROLES)
+    """Item-role nodes outside navigation, sidebar, header and footer landmarks."""
+    count, stack = 0, []  # stack of (indent, role) ancestors
+    for indent, role in sitemap._aria_roles(snapshot):
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        if role in sitemap.ITEM_ROLES and not any(r in CHROME_LANDMARKS for _, r in stack):
+            count += 1
+        stack.append((indent, role))
+    return count
 
 
 def wait_for_page(page: ReadOnlyPage, since_seq: int, guard: Guard, old_map: dict | None = None) -> None:
@@ -191,9 +204,13 @@ def wait_for_page(page: ReadOnlyPage, since_seq: int, guard: Guard, old_map: dic
 
     Self-heal: done as soon as the old map's sources have content (the runner's
     own check). Otherwise, and as a fallback: the accessibility tree shows at
-    least MIN_ITEMS item-role nodes and is unchanged across one poll."""
+    least MIN_ITEMS item-role nodes outside navigation/sidebar/header/footer and
+    is unchanged across one poll. Also done once the page has gone quiet
+    (runner.QuietTracker), so pages whose items use other roles do not wait for
+    the ceiling."""
     deadline = time.monotonic() + runner.FIRST_PASS_TIMEOUT_S
     old_sources = [s for s in sitemap.SOURCES if old_map and s in old_map]
+    tracker = runner.QuietTracker(page)
     last = None
     while True:
         if any(runner.content_ready(old_map, s, page, since_seq) for s in old_sources):
@@ -203,6 +220,8 @@ def wait_for_page(page: ReadOnlyPage, since_seq: int, guard: Guard, old_map: dic
             if snap == last:
                 return
             last = snap
+        if tracker.quiet():
+            return
         if time.monotonic() >= deadline:
             log.warning("page content did not settle within %.0f s; learning from it anyway",
                         runner.FIRST_PASS_TIMEOUT_S)
@@ -210,6 +229,8 @@ def wait_for_page(page: ReadOnlyPage, since_seq: int, guard: Guard, old_map: dic
         page.wait(runner.FIRST_PASS_POLL_S)
         started = time.monotonic()
         guard(page)
+        if time.monotonic() - started > runner.FIRST_PASS_POLL_S:
+            tracker.reset()
         deadline += time.monotonic() - started
 
 

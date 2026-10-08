@@ -133,6 +133,37 @@ setTimeout(() => { history.replaceState(null, '', '/late-challenge'); load(); },
 assert LATE_CHALLENGE_HTML != FEED_HTML
 
 
+# Late feed, but a sidebar list is there from the start (5 list items).
+LATE_SIDEBAR_HTML = LATE_HTML.replace(
+    '<body><main id="feed">',
+    '<body><aside><h2>Trending</h2><ul>'
+    + "".join(f'<li><a href="#">topic {i}</a></li>' for i in range(1, 6))
+    + '</ul></aside><main id="feed">')
+assert LATE_SIDEBAR_HTML != LATE_HTML
+
+# Loaded at once, items in plain divs (no article/listitem roles), no JSON.
+STATIC_DIVS_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Feed Test</title></head>
+<body><main><h1>Synthetic feed</h1>%s</main></body></html>
+""" % "".join(f'<div class="post" data-post-id="p{i}"><span class="text">Synthetic post {i}</span></div>'
+              for i in range(1, 6))
+
+# Never shows items but is never quiet: the DOM keeps changing...
+TICKING_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Feed Test</title></head>
+<body><main><h1>Synthetic feed</h1><p id="t">Loading 0</p></main>
+<script>let n = 0; setInterval(() => { document.getElementById('t').textContent = 'Loading ' + (++n); }, 300);</script>
+</body></html>
+"""
+# ...or JSON keeps arriving.
+POLLING_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Feed Test</title></head>
+<body><main><h1>Synthetic feed</h1><p>Loading</p></main>
+<script>setInterval(() => fetch('/api/config'), 300);</script>
+</body></html>
+"""
+
+
 def feed_page(n):
     edges = []
     for k in range(PER_PAGE):
@@ -171,6 +202,10 @@ def build_feed():
                entry(ORIGIN + "/late-dom", "text/html; charset=utf-8", LATE_DOM_HTML),
                entry(ORIGIN + "/never", "text/html; charset=utf-8", NEVER_HTML),
                entry(ORIGIN + "/late-challenge", "text/html; charset=utf-8", LATE_CHALLENGE_HTML),
+               entry(ORIGIN + "/late-sidebar", "text/html; charset=utf-8", LATE_SIDEBAR_HTML),
+               entry(ORIGIN + "/static-divs", "text/html; charset=utf-8", STATIC_DIVS_HTML),
+               entry(ORIGIN + "/ticking", "text/html; charset=utf-8", TICKING_HTML),
+               entry(ORIGIN + "/polling", "text/html; charset=utf-8", POLLING_HTML),
                entry(ORIGIN + "/api/config", "application/json",
                      json.dumps({"features": {"dark_mode": True}}))]
     for n in range(1, PAGES + 1):

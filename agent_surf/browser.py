@@ -72,6 +72,7 @@ class ResponseBuffer:
         self._items: deque[CapturedResponse] = deque(maxlen=maxlen)
         self._seq = itertools.count(1)
         self.last_seq = 0
+        self.activity = 0  # responses of any type seen; lets callers tell a quiet page
 
     def add(self, url: str, method: str, status: int, data: Any) -> None:
         seq = next(self._seq)
@@ -80,6 +81,7 @@ class ResponseBuffer:
 
     def on_response(self, response: Any) -> None:
         """Response listener. Keeps JSON bodies; never raises."""
+        self.activity += 1
         try:
             ctype = (response.headers.get("content-type") or "").lower()
             if "json" not in ctype:
