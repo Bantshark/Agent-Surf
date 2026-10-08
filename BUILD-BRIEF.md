@@ -363,4 +363,5 @@ issues were fixed on branch `claude/validate-fixes`:
    feed -> wait < 9 s; a page that keeps changing its DOM or fetching JSON
    waits to the ceiling; `item_nodes` ignores navigation/sidebar/header/footer.
    Not verifiable from the cloud: Windows and live sites (CLAUDE.md forbids
-   live requests here); see the live check below.
+   live requests here). Live check on the user's machine: freshly start the
+   browser, then `run x search --query ...` must not exit 4.
