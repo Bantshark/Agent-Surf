@@ -32,6 +32,23 @@ CREATE TABLE IF NOT EXISTS items (
     data_json TEXT NOT NULL,
     captured_at TEXT NOT NULL
 );
+-- v2: publishing queue (see outbox.py)
+CREATE TABLE IF NOT EXISTS queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site TEXT NOT NULL,
+    action TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    content_hash TEXT,
+    status TEXT NOT NULL,
+    scheduled_at TEXT,
+    missed_policy TEXT NOT NULL DEFAULT 'ask',
+    approved_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    receipt_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 

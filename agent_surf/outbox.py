@@ -1,0 +1,211 @@
+"""v2 publishing queue (SQLite table ``queue``).
+
+Every publish comes from an approved queue item. Approval freezes the content:
+``content_hash`` is the sha256 of the canonical payload plus the bytes of every
+media file, and publishing refuses if it no longer matches. Status changes go
+through ``transition`` and illegal ones raise.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import stat
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from agent_surf import sites
+from agent_surf.store import Store, now_iso
+
+ACTIONS = ("post", "reply", "dm", "comment")
+STATUSES = ("draft", "approved", "publishing", "published", "failed", "needs_attention", "rejected")
+MISSED_POLICIES = ("skip", "run", "ask")
+PAYLOAD_KEYS = ("text", "media", "target_url", "thread_url")
+# What each action needs in its payload, beyond text and/or media.
+ACTION_NEEDS = {"post": (), "reply": ("target_url",), "comment": ("target_url",), "dm": ("thread_url",)}
+
+TRANSITIONS = {
+    "draft": {"approved", "rejected"},
+    "approved": {"publishing", "rejected", "failed", "needs_attention"},
+    "publishing": {"published", "failed", "needs_attention"},
+    "needs_attention": {"approved", "rejected"},   # re-approval is a human decision
+    "failed": {"approved", "rejected"},
+    "published": set(),
+    "rejected": set(),
+}
+APPROVABLE = {"draft", "needs_attention", "failed"}
+
+
+class QueueError(ValueError):
+    pass
+
+
+class IllegalTransition(QueueError):
+    pass
+
+
+def parse_time(value: str) -> str:
+    """ISO 8601 -> UTC ISO string. A time without an offset is local time."""
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        raise QueueError(f"not an ISO 8601 time: {value!r}") from None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def check_media(paths: list[str]) -> None:
+    for p in paths:
+        try:
+            st = os.stat(p)
+        except OSError:
+            raise QueueError(f"media file not found: {p}") from None
+        if not stat.S_ISREG(st.st_mode):
+            raise QueueError(f"media is not a regular file: {p}")
+
+
+def normalize_payload(site: str, action: str, payload: dict) -> dict:
+    if action not in ACTIONS:
+        raise QueueError(f"unknown action {action!r}; use {', '.join(ACTIONS)}")
+    site_obj = sites.get_site(site)
+    unknown = set(payload) - set(PAYLOAD_KEYS)
+    if unknown:
+        raise QueueError(f"unknown payload keys: {', '.join(sorted(unknown))}")
+    out: dict[str, Any] = {}
+    text = payload.get("text")
+    if text is not None:
+        if not isinstance(text, str) or not text.strip():
+            raise QueueError("text must be a non-empty string")
+        out["text"] = text
+    media = payload.get("media") or []
+    if not isinstance(media, list) or not all(isinstance(m, str) and m for m in media):
+        raise QueueError("media must be a list of file paths")
+    if media:
+        out["media"] = [str(Path(m).expanduser().resolve()) for m in media]
+        check_media(out["media"])
+    if not out:
+        raise QueueError("a queue item needs text and/or media")
+    for key in ("target_url", "thread_url"):
+        if payload.get(key):
+            sites.check_url(site_obj, payload[key])
+            out[key] = payload[key]
+    for key in ACTION_NEEDS[action]:
+        if key not in out:
+            raise QueueError(f"{action} needs --{key.split('_')[0]}")
+    return out
+
+
+def content_hash(payload: dict) -> str:
+    """sha256 of the canonical payload plus the bytes of each media file."""
+    h = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                  ensure_ascii=False).encode())
+    for path in payload.get("media") or []:
+        h.update(b"\0")
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+    return "sha256-" + h.hexdigest()
+
+
+def _row(store: Store, item_id: int):
+    row = store.conn.execute("SELECT * FROM queue WHERE id = ?", (item_id,)).fetchone()
+    if row is None:
+        raise QueueError(f"no queue item {item_id}")
+    return row
+
+
+def to_dict(row: Any) -> dict:
+    d = dict(row)
+    d["payload"] = json.loads(d.pop("payload_json"))
+    d["receipt"] = json.loads(d.pop("receipt_json")) if d.get("receipt_json") else None
+    return d
+
+
+def get(store: Store, item_id: int) -> dict:
+    return to_dict(_row(store, item_id))
+
+
+def list_items(store: Store, status: str | None = None) -> list[dict]:
+    if status is not None and status not in STATUSES:
+        raise QueueError(f"unknown status {status!r}")
+    rows = store.conn.execute(
+        "SELECT * FROM queue" + (" WHERE status = ?" if status else "") + " ORDER BY id",
+        (status,) if status else ()).fetchall()
+    return [to_dict(r) for r in rows]
+
+
+def add(store: Store, site: str, action: str, payload: dict, *, scheduled_at: str | None = None,
+        missed_policy: str = "ask") -> int:
+    if missed_policy not in MISSED_POLICIES:
+        raise QueueError(f"missed policy must be one of {', '.join(MISSED_POLICIES)}")
+    clean = normalize_payload(site, action, payload)
+    when = parse_time(scheduled_at) if scheduled_at else None
+    now = now_iso()
+    with store.conn:
+        cur = store.conn.execute(
+            "INSERT INTO queue (site, action, payload_json, status, scheduled_at, missed_policy,"
+            " created_at, updated_at) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?)",
+            (site, action, json.dumps(clean, ensure_ascii=False), when, missed_policy, now, now))
+    return cur.lastrowid
+
+
+def transition(store: Store, item_id: int, new_status: str, *, last_error: str | None = None,
+               receipt: dict | None = None, content_hash_value: str | None = None,
+               count_attempt: bool = False) -> dict:
+    row = _row(store, item_id)
+    old = row["status"]
+    if new_status not in STATUSES:
+        raise IllegalTransition(f"unknown status {new_status!r}")
+    if new_status not in TRANSITIONS[old]:
+        raise IllegalTransition(f"queue item {item_id}: {old} -> {new_status} is not allowed")
+    now = now_iso()
+    sets = ["status = ?", "updated_at = ?", "last_error = ?"]
+    args: list[Any] = [new_status, now, last_error]
+    if new_status == "approved":
+        sets += ["approved_at = ?", "content_hash = ?"]
+        args += [now, content_hash_value]
+    if receipt is not None:
+        sets.append("receipt_json = ?")
+        args.append(json.dumps(receipt, ensure_ascii=False))
+    if count_attempt:
+        sets.append("attempts = attempts + 1")
+    with store.conn:
+        cur = store.conn.execute(
+            f"UPDATE queue SET {', '.join(sets)} WHERE id = ? AND status = ?", (*args, item_id, old))
+    if cur.rowcount != 1:  # someone else moved it first
+        raise IllegalTransition(f"queue item {item_id} changed status concurrently")
+    return get(store, item_id)
+
+
+def approve(store: Store, item_id: int) -> dict:
+    item = get(store, item_id)
+    if item["status"] not in APPROVABLE:
+        raise IllegalTransition(f"queue item {item_id} is {item['status']}; only "
+                                f"{', '.join(sorted(APPROVABLE))} items can be approved")
+    check_media(item["payload"].get("media") or [])
+    return transition(store, item_id, "approved", content_hash_value=content_hash(item["payload"]))
+
+
+def approve_all_drafts(store: Store) -> list[dict]:
+    return [approve(store, item["id"]) for item in list_items(store, "draft")]
+
+
+def reject(store: Store, item_id: int) -> dict:
+    return transition(store, item_id, "rejected")
+
+
+def verify_approved(item: dict) -> str | None:
+    """None if the item may be published as approved, else the reason it may not."""
+    if item["status"] != "approved":
+        return f"status is {item['status']}, not approved"
+    try:
+        check_media(item["payload"].get("media") or [])
+        current = content_hash(item["payload"])
+    except (QueueError, OSError) as e:
+        return f"media changed since approval: {e}"
+    if current != item["content_hash"]:
+        return "content changed since approval (content_hash mismatch)"
+    return None
