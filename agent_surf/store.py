@@ -32,6 +32,15 @@ CREATE TABLE IF NOT EXISTS items (
     data_json TEXT NOT NULL,
     captured_at TEXT NOT NULL
 );
+-- v2: action maps (see actionmap.py), versioned like reading maps
+CREATE TABLE IF NOT EXISTS action_maps (
+    site TEXT NOT NULL,
+    action TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (site, action, version)
+);
 -- v2: publishing queue (see outbox.py)
 CREATE TABLE IF NOT EXISTS queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

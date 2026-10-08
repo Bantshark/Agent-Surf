@@ -55,11 +55,19 @@ FEED_SITE = sites.Site("feedtest", ("feed.test",), {
 })
 
 
+COMPOSE_SITE = sites.Site("composetest", ("compose.test",), {
+    "profile": "https://compose.test/profile",
+    "inbox": "https://compose.test/inbox",
+})
+
+
 @pytest.fixture(autouse=True)
 def feed_site():
     sites.register_site(FEED_SITE)
+    sites.register_site(COMPOSE_SITE)
     yield FEED_SITE
     sites.unregister_site(FEED_SITE.name)
+    sites.unregister_site(COMPOSE_SITE.name)
 
 
 @pytest.fixture(scope="module")
