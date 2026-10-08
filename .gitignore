@@ -1,5 +1,6 @@
 # Local runtime state — profiles, DB, learned maps
 .agent-surf/
+debug/
 chrome-profile/
 *.db
 *.sqlite

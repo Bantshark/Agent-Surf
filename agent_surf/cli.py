@@ -75,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     la.add_argument("--target", help="post URL to reply to / comment on")
     la.add_argument("--thread", help="conversation URL for dm")
     la.add_argument("--start", help="composer URL, overriding the site default for posts")
+    la.add_argument("--keep-debug", action="store_true",
+                    help="also write the debug folder ($AGENT_SURF_HOME/debug) when learning succeeds")
 
     q = sub.add_parser("queue", help="add, review, approve or reject what will be published")
     qsub = q.add_subparsers(dest="queue_command", required=True)
@@ -261,9 +263,13 @@ def cmd_learn_action(cfg: config.Config, args: argparse.Namespace) -> int:
             m = action_learner.learn_action(
                 store, ActionPage(session.open_tab(), site), args.site, args.action, client=client,
                 model=cfg.model, maps_dir=cfg.maps_dir, target_url=args.target, thread_url=args.thread,
-                start_url=args.start, guard=challenge.make_guard())
+                start_url=args.start, guard=challenge.make_guard(),
+                debug_dir=cfg.home / "debug", keep_debug=args.keep_debug)
         except action_learner.ActionLearnError as e:
             log.error("%s", e)
+            if e.debug_path:
+                log.error("debug evidence: %s", e.debug_path)
+            emit(args, {"error": str(e), "debug": str(e.debug_path) if e.debug_path else None})
             return EXIT_ERROR
     log.info("learned %s %s action map v%d (rehearsed, nothing published)", args.site, args.action, m["version"])
     emit(args, m)

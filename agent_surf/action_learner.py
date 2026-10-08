@@ -18,6 +18,7 @@ import struct
 import tempfile
 import time
 import zlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -77,7 +78,39 @@ Never target like/follow/delete/report/block controls. JSON paths use dot keys,
 
 
 class ActionLearnError(RuntimeError):
-    pass
+    def __init__(self, message: str, notes: list[str] | None = None):
+        super().__init__(message)
+        self.notes = notes or []           # executor notes up to the failure
+        self.debug_path: Path | None = None
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def write_debug(debug_root: str | Path, site: str, action: str, *, amap: dict, error: str | None,
+                notes: list[str], aria_before: str, aria_after: str) -> Path | None:
+    """Evidence for a learn-action run: the map, the error, executor notes and
+    aria snapshots at composer open and at the end. No cookies, headers,
+    response bodies or typed text (only the synthetic rehearsal text can appear
+    in the page snapshot). Never written inside the repository."""
+    root = Path(debug_root).expanduser().resolve()
+    if root == REPO_ROOT or REPO_ROOT in root.parents:
+        log.warning("not writing debug evidence inside the repository (%s)", root)
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    folder = root / f"{stamp}-{site}-{action}"
+    n = 1
+    while folder.exists():
+        n += 1
+        folder = root / f"{stamp}-{site}-{action}-{n}"
+    folder.mkdir(parents=True)
+    name = "rejected-map.json" if error else "learned-map.json"
+    (folder / name).write_text(json.dumps(amap, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (folder / "error.txt").write_text((error or "no error: rehearsal passed") + "\n", encoding="utf-8")
+    (folder / "notes.txt").write_text("\n".join(notes) + "\n", encoding="utf-8")
+    (folder / "aria-before.yaml").write_text(aria_before, encoding="utf-8")
+    (folder / "aria-after.yaml").write_text(aria_after, encoding="utf-8")
+    return folder
 
 
 def synthetic_png(path: Path) -> Path:
@@ -155,15 +188,17 @@ def _rehearse_pass(page: ActionPage, m: dict, payload: dict, guard: Any, name: s
             run.discard()  # best effort: leave no draft behind
         except Exception:
             pass
-        raise ActionLearnError(f"rehearsal failed ({name}): {e}") from e
+        raise ActionLearnError(f"rehearsal failed ({name}): {e}",
+                               [f"{name}: {n}" for n in run.notes]) from e
+    notes = [f"{name}: {n}" for n in run.notes]
     if not run.composer_closed():  # the composer this run used, not a look-alike behind it
-        raise ActionLearnError(f"rehearsal failed ({name}): the composer is still open after discard")
+        raise ActionLearnError(f"rehearsal failed ({name}): the composer is still open after discard", notes)
     net = m["confirm"].get("network")
     if net:
         rx = re.compile(net["url_regex"])
         if any(meth == net.get("method", "POST") and rx.search(u) for meth, u in page.requests[first_request:]):
-            raise ActionLearnError(f"rehearsal failed ({name}): a create request was sent")
-    return [f"{name}: {n}" for n in run.notes]
+            raise ActionLearnError(f"rehearsal failed ({name}): a create request was sent", notes)
+    return notes
 
 
 def rehearse(page: ActionPage, m: dict, payload_urls: dict, guard: Any) -> list[str]:
@@ -177,20 +212,26 @@ def rehearse(page: ActionPage, m: dict, payload_urls: dict, guard: Any) -> list[
     with tempfile.TemporaryDirectory(prefix="agent-surf-rehearsal-") as tmp:
         png = [str(synthetic_png(Path(tmp) / "rehearsal.png"))]
         if not sites.media_required(m["site"], m["action"]):
-            notes += _rehearse_pass(page, m, dict(payload_urls, text=text), guard, "pass 1 (text only)")
-            if has_attach:
-                notes += _rehearse_pass(page, m, dict(payload_urls, text=text, media=png), guard,
-                                        "pass 2 (with media)")
+            passes = [("pass 1 (text only)", {})] + ([("pass 2 (with media)", {"media": png})] if has_attach else [])
         else:
-            notes += _rehearse_pass(page, m, dict(payload_urls, text=text, media=png), guard,
-                                    "media pass (media required)")
+            passes = [("media pass (media required)", {"media": png})]
+        for name, extra in passes:
+            try:
+                notes += _rehearse_pass(page, m, dict(payload_urls, text=text, **extra), guard, name)
+            except ActionLearnError as e:
+                e.notes = notes + e.notes
+                raise
     return notes
 
 
 def learn_action(store: Store, page: ActionPage, site: str, action: str, *, client: Any, model: str,
                  maps_dir: Any, target_url: str | None = None, thread_url: str | None = None,
                  start_url: str | None = None, old_map: dict | None = None,
-                 broken_reason: str | None = None, guard: Any = None) -> dict:
+                 broken_reason: str | None = None, guard: Any = None,
+                 debug_dir: str | Path | None = None, keep_debug: bool = False) -> dict:
+    """Learn and rehearse an action map. With ``debug_dir``, a failure after the
+    model returned a map writes evidence there (see write_debug); with
+    ``keep_debug`` a successful run does too."""
     guard = guard or (lambda p: None)
     url = start_url or start_url_for(site, action, target_url, thread_url)
     sites.check_url(site, url)
@@ -201,8 +242,8 @@ def learn_action(store: Store, page: ActionPage, site: str, action: str, *, clie
     wait_for_composer(page, since, guard)
     page.read.check_domain()
 
-    prompt = build_action_prompt(site, action, url, page.read.aria_snapshot(), page.buffer.all(),
-                                 old_map, broken_reason)
+    aria_before = page.read.aria_snapshot()
+    prompt = build_action_prompt(site, action, url, aria_before, page.buffer.all(), old_map, broken_reason)
     log.info("asking %s for a %s %s action map", model, site, action)
     response = client.messages.create(model=model, max_tokens=MAX_TOKENS, system=ACTION_SYSTEM_PROMPT,
                                       messages=[{"role": "user", "content": prompt}])
@@ -212,12 +253,26 @@ def learn_action(store: Store, page: ActionPage, site: str, action: str, *, clie
         raise ActionLearnError(str(e)) from None
     m.pop("version", None)
     m.update(site=site, action=action, learned_at=now_iso(), learned_by=model)
-    problems = actionmap.validate_action_map(dict(m, version=1))
-    if problems:
-        raise ActionLearnError("model action map is invalid: " + "; ".join(problems))
+
+    def evidence(error: str | None, notes: list[str]) -> Path | None:
+        if debug_dir is None:
+            return None
+        try:
+            after = page.read.aria_snapshot()
+        except Exception:
+            after = ""
+        return write_debug(debug_dir, site, action, amap=m, error=error, notes=notes,
+                           aria_before=aria_before, aria_after=after)
 
     urls = {k: v for k, v in (("target_url", target_url), ("thread_url", thread_url)) if v}
-    notes = rehearse(page, m, urls, guard)
+    try:
+        problems = actionmap.validate_action_map(dict(m, version=1))
+        if problems:
+            raise ActionLearnError("model action map is invalid: " + "; ".join(problems))
+        notes = rehearse(page, m, urls, guard)
+    except ActionLearnError as e:
+        e.debug_path = evidence(str(e), e.notes)
+        raise
     for n in notes:
         log.info("rehearsal: %s", n)
     try:
@@ -225,4 +280,8 @@ def learn_action(store: Store, page: ActionPage, site: str, action: str, *, clie
     except ActionMapError as e:
         raise ActionLearnError(str(e)) from None
     log.info("saved %s after a clean rehearsal", path.name)
+    if keep_debug:
+        kept = evidence(None, notes)
+        if kept:
+            log.info("debug evidence: %s", kept)
     return actionmap.load_action_map(path)
