@@ -101,3 +101,28 @@ def store():
     s = Store(":memory:")
     yield s
     s.close()
+
+
+@pytest.fixture
+def compose(chromium):
+    """Factory: compose("/compose-plain") -> (ActionPage on a fresh tab, FakeBackend)."""
+    from agent_surf.executor import ActionPage
+    from composekit import FakeBackend
+
+    contexts = []
+
+    def make(path=None, backend=None):
+        backend = backend or FakeBackend()
+        ctx = chromium.new_context(viewport={"width": 1000, "height": 800})
+        ctx.route_from_har(FIXTURES / "compose.har", not_found="abort")
+        backend.install(ctx)
+        contexts.append(ctx)
+        page = ActionPage(ctx.new_page(), COMPOSE_SITE)
+        if path:
+            page.goto("https://compose.test" + path)
+        return page, backend
+
+    yield make
+    for ctx in contexts:
+        ctx.close()
+
