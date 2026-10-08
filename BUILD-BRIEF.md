@@ -341,3 +341,26 @@ issues were fixed on branch `claude/validate-fixes`:
    once; a checkpoint appearing during the wait triggers challenge handling
    (Telegram mocked) and the run succeeds; learning the late-feed page saves a
    valid map with `dry_run_items == 5`.
+6. **Cold-start wait gaps** (branch `claude/cold-start-fix`, after Fix 5).
+   Gaps: the learner's first-learn wait counted item-role nodes anywhere, so a
+   sidebar or nav list could end it before a late feed; pages whose items use
+   no item role waited the full 15 s; a feed that never arrived took ~15 s +
+   `delay_s` to report broken, plus up to 15 s more in the relearn.
+   Change: `learner.item_nodes` counts only item-role nodes outside
+   navigation, complementary, banner and contentinfo landmarks. Both waits
+   also end when the page is quiet (`runner.QuietTracker`): no response of
+   any type (`ResponseBuffer.activity`, counted before the JSON filter) and no
+   aria snapshot change for `FIRST_PASS_QUIET_S = 5`. Any response or DOM
+   change restarts the clock; challenge time is not quiet. Measured with the
+   real ceiling on the synthetic never-arriving page: `MapBroken` in 7.4 s
+   (was ~17 s), run + failed relearn 16.6 s (was ~38 s). A cold app that is
+   completely silent (no requests, no DOM change) for over 5 s before
+   requesting its feed would still be cut short; the first-pass retry
+   (`FIRST_PASS_ATTEMPTS`) is the remaining margin.
+   Tests (`test_cold_start.py`; pages `/late-sidebar`, `/static-divs`,
+   `/ticking`, `/polling`): sidebar list with a 3 s late feed -> learner counts
+   5 pre-scroll items; static div page -> learner wait < 9 s; never-arriving
+   feed -> wait < 9 s; a page that keeps changing its DOM or fetching JSON
+   waits to the ceiling; `item_nodes` ignores navigation/sidebar/header/footer.
+   Not verifiable from the cloud: Windows and live sites (CLAUDE.md forbids
+   live requests here); see the live check below.
