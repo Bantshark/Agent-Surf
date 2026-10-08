@@ -152,7 +152,7 @@ def lookup_post(store: Store, open_page: OpenPage, amap: dict, payload: dict) ->
     page.goto(url)
     runner.wait_for_content(m, page, since, lambda p: None)
     for source in [m["source"]] + [s for s in sitemap.SOURCES if s != m["source"] and s in m]:
-        responses = page.buffer.since(since) if source == "network" else None
+        responses = page.buffer.since(since) if source in sitemap.STREAM_SOURCES else None
         for it in runner.extract_items(m, source, page, responses):
             if it["item_id"] and any(isinstance(v, str) and normalize_text(v) == text
                                      for v in it["fields"].values()):
@@ -291,7 +291,8 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
     if error:
         return _finish(store, item_id, "needs_attention", logrow, error=f"not published: {error}", notes=notes)
     if post_id is None:
-        return resolve_unknown(store, open_page, item, amap, logrow, f"no {via} confirmation")
+        return resolve_unknown(store, open_page, item, amap, logrow,
+                               f"no {via} confirmation; page after submit: {sub.page_changes()}")
     receipt = {"post_id": post_id, "permalink": amap["permalink_template"].format(id=post_id),
                "confirmed_at": _iso(datetime.now(timezone.utc)), "via": via}
     try:

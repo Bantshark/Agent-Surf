@@ -40,6 +40,15 @@ def unregister_site(name: str) -> None:
     SITES.pop(name, None)
 
 
+# Page types the `inbox` command reads (notifications and messages).
+INBOX_PAGE_TYPES: dict[str, set[str]] = {
+    "x": {"notifications", "messages"},
+    "instagram": {"messages"},
+    "facebook": {"notifications"},
+    "linkedin": {"notifications", "messages"},
+    "reddit": {"inbox"},
+}
+
 # Where learn-action opens a composer for a new post. Replies, comments and DMs
 # start from the queue item's / learn-action's --target or --thread URL.
 ACTION_START: dict[str, dict[str, str]] = {
@@ -108,24 +117,31 @@ for _site in (
         "home": "https://x.com/home",
         "search": "https://x.com/search?q={query}&f=live",
         "profile": "https://x.com/{handle}",
+        "notifications": "https://x.com/notifications",
+        "messages": "https://x.com/messages",
     }),
     Site("reddit", ("reddit.com",), {
         "subreddit": "https://www.reddit.com/r/{handle}/new/",
         "post": "https://www.reddit.com/comments/{handle}/",
         "search": "https://www.reddit.com/search/?q={query}&sort=new",
+        "inbox": "https://www.reddit.com/message/inbox/",
     }),
     Site("instagram", ("instagram.com",), {
         "profile": "https://www.instagram.com/{handle}/",
         "feed": "https://www.instagram.com/",
+        "messages": "https://www.instagram.com/direct/inbox/",
     }),
     Site("facebook", ("facebook.com",), {
         "page": "https://www.facebook.com/{handle}",
         "feed": "https://www.facebook.com/",
+        "notifications": "https://www.facebook.com/notifications",
     }),
     Site("linkedin", ("linkedin.com",), {
         "profile": "https://www.linkedin.com/in/{handle}/recent-activity/all/",
         "feed": "https://www.linkedin.com/feed/",
         "jobs": "https://www.linkedin.com/jobs/search/?keywords={query}",
+        "notifications": "https://www.linkedin.com/notifications/",
+        "messages": "https://www.linkedin.com/messaging/",
     }),
 ):
     register_site(_site)

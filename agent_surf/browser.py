@@ -13,6 +13,7 @@ those that pass ``safe_to_click``. It has no typing or form methods.
 from __future__ import annotations
 
 import itertools
+import json
 import logging
 import re
 from collections import deque
@@ -93,6 +94,26 @@ class ResponseBuffer:
             self.add(response.url, response.request.method, response.status, data)
         except Exception:  # a listener must never break the page
             return
+
+    def on_websocket(self, ws: Any) -> None:
+        """WebSocket listener: keep JSON frames from this socket; never raises."""
+        try:
+            url = ws.url
+            ws.on("framereceived", lambda payload: self.on_frame(url, payload))
+        except Exception:
+            return
+
+    def on_frame(self, url: str, payload: Any) -> None:
+        """A received frame (str or bytes). JSON-parseable text is kept as a
+        CapturedResponse with method "WS"; anything else is ignored."""
+        self.activity += 1
+        try:
+            text = payload.decode("utf-8") if isinstance(payload, (bytes, bytearray)) else payload
+            data = json.loads(text)
+        except Exception:
+            return
+        if isinstance(data, (dict, list)):
+            self.add(url, "WS", 101, data)
 
     def all(self) -> list[CapturedResponse]:
         return list(self._items)
@@ -190,6 +211,7 @@ class ReadOnlyPage:
         self.site = site
         self.buffer = buffer if buffer is not None else ResponseBuffer()
         page.on("response", self.buffer.on_response)
+        page.on("websocket", self.buffer.on_websocket)
 
     # actions: navigate (domain-locked), scroll, wait
 

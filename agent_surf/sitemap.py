@@ -16,14 +16,15 @@ from typing import Any, Iterable
 
 ALLOWED_KEYS = {
     "site", "page_type", "version", "source", "network", "dom", "required_fields",
-    "fingerprint", "scroll", "limits", "learned_at", "learned_by", "click",
+    "fingerprint", "scroll", "limits", "learned_at", "learned_by", "click", "websocket",
 }
 REQUIRED_KEYS = {"site", "page_type", "source", "required_fields", "scroll", "limits"}
 NETWORK_KEYS = {"url_regex", "items_path", "id_path", "fields"}
 DOM_KEYS = {"item", "id_attr", "fields"}
 SCROLL_KEYS = {"max_scrolls", "delay_s", "stop_after_seen"}
 LIMITS_KEYS = {"max_items"}
-SOURCES = ("network", "dom")
+SOURCES = ("network", "dom", "websocket")
+STREAM_SOURCES = ("network", "websocket")  # extracted from captured JSON (responses / WS frames)
 # Names the runner adds to every output item; a field may not shadow them.
 RESERVED_FIELDS = {"site", "page_type", "item_id"}
 
@@ -150,6 +151,31 @@ def _is_num(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _check_stream(m: dict, stream: str, problems: list[str]) -> None:
+    net = m.get(stream)
+    if stream in m:
+        if not isinstance(net, dict):
+            problems.append(f"{stream}: must be an object")
+        else:
+            _check_keys(net, NETWORK_KEYS, stream, problems)
+            for k in sorted(NETWORK_KEYS - set(net)):
+                problems.append(f"{stream}: missing key {k}")
+            rx = net.get("url_regex")
+            if "url_regex" in net:
+                if not isinstance(rx, str) or not rx:
+                    problems.append(f"{stream}.url_regex: must be a non-empty string")
+                else:
+                    try:
+                        re.compile(rx)
+                    except re.error as e:
+                        problems.append(f"{stream}.url_regex: does not compile ({e})")
+            for k in ("items_path", "id_path"):
+                if k in net:
+                    _check_path(net[k], f"{stream}.{k}", problems)
+            if "fields" in net:
+                _check_fields(net["fields"], f"{stream}.fields", _check_path, problems)
+
+
 def validate_map(m: Any) -> list[str]:
     """Return a list of problems; an empty list means the map is valid."""
     if not isinstance(m, dict):
@@ -170,32 +196,12 @@ def validate_map(m: Any) -> list[str]:
 
     source = m.get("source")
     if "source" in m and source not in SOURCES:
-        problems.append("source: must be 'network' or 'dom'")
+        problems.append("source: must be 'network', 'dom' or 'websocket'")
     elif source in SOURCES and source not in m:
         problems.append(f"source is {source!r} but there is no {source} block")
 
-    net = m.get("network")
-    if "network" in m:
-        if not isinstance(net, dict):
-            problems.append("network: must be an object")
-        else:
-            _check_keys(net, NETWORK_KEYS, "network", problems)
-            for k in sorted(NETWORK_KEYS - set(net)):
-                problems.append(f"network: missing key {k}")
-            rx = net.get("url_regex")
-            if "url_regex" in net:
-                if not isinstance(rx, str) or not rx:
-                    problems.append("network.url_regex: must be a non-empty string")
-                else:
-                    try:
-                        re.compile(rx)
-                    except re.error as e:
-                        problems.append(f"network.url_regex: does not compile ({e})")
-            for k in ("items_path", "id_path"):
-                if k in net:
-                    _check_path(net[k], f"network.{k}", problems)
-            if "fields" in net:
-                _check_fields(net["fields"], "network.fields", _check_path, problems)
+    for stream in STREAM_SOURCES:
+        _check_stream(m, stream, problems)
 
     dom = m.get("dom")
     if "dom" in m:
@@ -409,3 +415,41 @@ def load_map(path: str | Path) -> dict:
     if problems:
         raise MapError(f"invalid map {path}: " + "; ".join(problems))
     return m
+
+
+# ---------------------------------------------------------------------------
+# Aria snapshot delta: which nodes changed between two snapshots.
+
+def _aria_nodes(snapshot: str) -> list[str]:
+    """Each node as its ancestor path, e.g. 'main > list > listitem "a"'."""
+    out, stack = [], []  # stack of (indent, text)
+    for line in snapshot.splitlines():
+        m = _ARIA_LINE.match(line)
+        if not m:
+            continue
+        indent, text = len(m.group(1)), m.group(2).rstrip(":").strip()
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        stack.append((indent, text))
+        out.append(" > ".join(t for _, t in stack))
+    return out
+
+
+def aria_delta(before: str, after: str) -> dict[str, list[str]]:
+    """Only the nodes that changed: those added in ``after`` and removed from
+    ``before`` (a node is its text plus its ancestor path; counts matter)."""
+    from collections import Counter
+
+    b, a = _aria_nodes(before), _aria_nodes(after)
+    extra_a, extra_b = Counter(a) - Counter(b), Counter(b) - Counter(a)
+
+    def pick(nodes: list[str], extra: Counter) -> list[str]:
+        out = []
+        for n in nodes:
+            if extra[n] > 0:
+                out.append(n)
+                extra[n] -= 1
+        return out
+
+    return {"added": pick(a, extra_a), "removed": pick(b, extra_b)}
+

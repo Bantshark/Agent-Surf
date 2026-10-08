@@ -23,7 +23,7 @@ import time
 import unicodedata
 from typing import Any, Callable
 
-from agent_surf import actionmap, sites
+from agent_surf import actionmap, sitemap, sites
 from agent_surf.actionmap import PRESS_KEYS, SUBMIT_LABELS, Resolved, resolve_target, try_resolve
 from agent_surf.browser import ReadOnlyPage
 
@@ -351,6 +351,7 @@ class Submitter(StepRunner):
         sequence number from just before the click (for receipts)."""
         self._guard()
         r, label = self._checked_submit()
+        self.aria_before_submit = self.page.read.aria_snapshot()  # evidence: see page_changes()
         seq = self.page.buffer.last_seq
         try:
             r.locator.click(timeout=CLICK_TIMEOUT_MS, trial=True)  # actionable? no click yet
@@ -362,6 +363,16 @@ class Submitter(StepRunner):
             raise SubmitUnknown(f"submit click raised {type(e).__name__}") from None
         self.notes.append(f"submit: clicked {label!r}")
         return seq
+
+
+    def page_changes(self, limit: int = 5) -> str:
+        """What changed on the page since submit (aria delta), for evidence."""
+        before = getattr(self, "aria_before_submit", None)
+        if before is None:
+            return "no snapshot"
+        delta = sitemap.aria_delta(before, self.page.read.aria_snapshot())
+        shown = "; ".join(n[-120:] for n in delta["added"][:limit])
+        return f"+{len(delta['added'])}/-{len(delta['removed'])} nodes" + (f" (added: {shown})" if shown else "")
 
 
 class SubmitUnknown(RuntimeError):

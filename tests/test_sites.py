@@ -14,7 +14,16 @@ INITIAL = {
 
 def test_initial_registry():
     for name, page_types in INITIAL.items():
-        assert set(sites.get_site(name).page_types) == page_types
+        assert set(sites.get_site(name).page_types) == page_types | sites.INBOX_PAGE_TYPES[name]
+
+
+def test_inbox_page_types():
+    assert sites.INBOX_PAGE_TYPES == {
+        "x": {"notifications", "messages"}, "instagram": {"messages"}, "facebook": {"notifications"},
+        "linkedin": {"notifications", "messages"}, "reddit": {"inbox"}}
+    for site, types in sites.INBOX_PAGE_TYPES.items():
+        for t in types:
+            sites.check_url(site, sites.build_url(site, t))
 
 
 def test_build_url_fills_and_encodes():

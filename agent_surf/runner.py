@@ -63,12 +63,17 @@ def load_current_map(store: Store, site: str, page_type: str) -> dict:
     return sitemap.load_map(row["path"])
 
 
+def _stream(responses: list, source: str) -> list:
+    """HTTP responses for network, WebSocket frames (method "WS") for websocket."""
+    return [r for r in responses if (r.method == "WS") == (source == "websocket")]
+
+
 def extract_items(m: dict, source: str, page: ReadOnlyPage, responses: list | None = None) -> list[dict]:
     """Raw items from one source. ``responses`` defaults to the whole buffer."""
-    if source == "network":
+    if source in sitemap.STREAM_SOURCES:
         if responses is None:
             responses = page.buffer.all()
-        return sitemap.items_from_responses(m["network"], responses)
+        return sitemap.items_from_responses(m[source], _stream(responses, source))
     return page.dom_items(m["dom"])
 
 
@@ -106,11 +111,12 @@ def health_problems(batch: list[dict], required: list[str], dry_run_items: int |
 
 
 def content_ready(m: dict, source: str, page: ReadOnlyPage, since_seq: int) -> bool:
-    """Has this source's content arrived: a response matching url_regex since
-    ``since_seq`` (network), or at least one dom.item element (dom)?"""
-    if source == "network":
-        rx = re.compile(m["network"]["url_regex"])
-        return any(rx.search(r.url) for r in page.buffer.since(since_seq))
+    """Has this source's content arrived: a response (network) or WebSocket
+    frame (websocket) matching url_regex since ``since_seq``, or at least one
+    dom.item element (dom)?"""
+    if source in sitemap.STREAM_SOURCES:
+        rx = re.compile(m[source]["url_regex"])
+        return any(rx.search(r.url) for r in _stream(page.buffer.since(since_seq), source))
     return bool(page.dom_items(m["dom"]))
 
 
@@ -214,7 +220,7 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
 
     def pass_items(source: str) -> list[dict]:
         nonlocal cursor
-        if source == "network":
+        if source in sitemap.STREAM_SOURCES:
             fresh = page.buffer.since(cursor)
             cursor = page.buffer.last_seq
             return extract_items(m, source, page, fresh)
