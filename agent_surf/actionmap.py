@@ -27,7 +27,8 @@ SUBMIT_LABELS = {
     "comment": ("Comment", "Post", "Reply"),
 }
 ALLOWED_KEYS = {"site", "action", "version", "start", "steps", "submit", "discard", "dismiss",
-                "confirm", "permalink_template", "limits", "lookup", "learned_at", "learned_by"}
+                "confirm", "permalink_template", "limits", "lookup", "learned_at", "learned_by",
+                "composer"}
 REQUIRED_KEYS = {"site", "action", "start", "steps", "submit", "discard", "confirm",
                  "permalink_template", "limits"}
 STEP_KEYS = {"op", "target", "value", "state", "preview"}
@@ -170,6 +171,12 @@ def validate_action_map(m: Any) -> list[str]:
             if not isinstance(requires, list) or not all(r in PAYLOAD_KEYS for r in requires):
                 problems.append(f"start.requires: must be a list of {', '.join(PAYLOAD_KEYS)}")
                 requires = []
+    if "composer" in m:
+        comp = m["composer"]
+        if not isinstance(comp, dict) or set(comp) != {"target"}:
+            problems.append("composer: must be an object with only a target")
+        else:
+            _check_target(comp["target"], "composer", problems)
     if "steps" in m:
         _check_steps(m["steps"], "steps", STEP_OPS, problems, needs)
     if "discard" in m:
@@ -341,8 +348,9 @@ def _is_file_input(loc: Any) -> bool:
         return False
 
 
-def try_resolve(page: Any, target: dict, *, allow_hidden_file_input: bool = False,
-                max_per_strategy: int = 20) -> Resolved | None:
+def candidates(page: Any, target: dict, *, allow_hidden_file_input: bool = False,
+               max_per_strategy: int = 20):
+    """Visible matches in resolution order (role+name, testid, css), as Resolved."""
     for how, loc in _candidates(page, target):
         try:
             n = min(loc.count(), max_per_strategy)
@@ -352,10 +360,15 @@ def try_resolve(page: Any, target: dict, *, allow_hidden_file_input: bool = Fals
             el = loc.nth(i)
             try:
                 if el.is_visible() or (allow_hidden_file_input and _is_file_input(el)):
-                    return Resolved(el, how)
+                    yield Resolved(el, how)
             except Exception:
                 continue
-    return None
+
+
+def try_resolve(page: Any, target: dict, *, allow_hidden_file_input: bool = False,
+                max_per_strategy: int = 20) -> Resolved | None:
+    return next(candidates(page, target, allow_hidden_file_input=allow_hidden_file_input,
+                           max_per_strategy=max_per_strategy), None)
 
 
 def resolve_target(page: Any, target: dict, *, timeout_s: float = 0.0, poll_s: float = 0.25,

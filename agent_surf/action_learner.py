@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_surf import actionmap, learner, runner, sitemap, sites
-from agent_surf.actionmap import ActionMapError, SUBMIT_LABELS, try_resolve
+from agent_surf.actionmap import ActionMapError, SUBMIT_LABELS
 from agent_surf.executor import ActionPage, Refused, StepFailed, StepRunner
 from agent_surf.store import Store, now_iso
 
@@ -54,9 +54,15 @@ Reply with exactly one JSON object and nothing else, with these keys:
 - "submit": {{"target": the final publish button, "label_allowlist": its visible label}}.
   Allowed labels: post {list(SUBMIT_LABELS['post'])}, reply {list(SUBMIT_LABELS['reply'])},
   dm {list(SUBMIT_LABELS['dm'])}, comment {list(SUBMIT_LABELS['comment'])}.
+- "composer" (required when the composer is a dialog/modal or one of several text
+  boxes on the page): {{"target": the container holding the composer's text box and
+  its submit button, typically the [role=dialog]}}. Text is typed, media attached and
+  submit clicked only inside it.
 - "discard": steps (click, press, wait_for) that close the composer WITHOUT publishing,
   including confirming a "Discard"/"Don't save" dialog, ending with a wait_for that the
-  text box is hidden.
+  COMPOSER CONTAINER (the "composer" target) is hidden. Do not end by waiting for the
+  text box to be hidden: sites often keep another text box with the same name on the
+  page behind (e.g. a timeline's inline composer), and it stays visible.
 - "dismiss" (optional): click/press steps that close a popup covering the composer.
 - "confirm": {{"network": {{"url_regex": the create request, "method": "POST",
   "id_path": path to the new post id in its JSON response, "error_path": path to an
@@ -150,8 +156,7 @@ def rehearse(page: ActionPage, m: dict, payload_urls: dict, guard: Any) -> list[
             except Exception:
                 pass
             raise ActionLearnError(f"rehearsal failed: {e}") from e
-        typed = next((s["target"] for s in m["steps"] if s.get("op") == "type"), m["submit"]["target"])
-        if try_resolve(page.raw, typed) is not None:
+        if not run.composer_closed():  # the composer this run used, not a look-alike behind it
             raise ActionLearnError("rehearsal failed: the composer is still open after discard")
         net = m["confirm"].get("network")
         if net:

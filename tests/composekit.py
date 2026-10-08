@@ -53,6 +53,7 @@ class FakeBackend:
         self.mode = mode
         self.posts = {}            # id -> text, newest last
         self.create_calls = 0
+        self.bodies = []           # create request bodies, in order
         self.next_id = 1000
         self.permalink_override = None
 
@@ -66,6 +67,7 @@ class FakeBackend:
             return route.fulfill(status=405, body="")
         self.create_calls += 1
         body = json.loads(route.request.post_data or "{}")
+        self.bodies.append(body)
         if self.mode == "errors":
             return route.fulfill(status=200, json={"errors": [{"message": "Something went wrong"}]})
         pid = str(self.next_id)

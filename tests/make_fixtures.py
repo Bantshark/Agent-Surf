@@ -368,6 +368,78 @@ def compose_page(editor="input", media="hidden", overlay=False, late_ms=0, injec
             + '</script></body></html>')
 
 
+# Fix 7: a modal composer ([role=dialog]) over a page that has its own inline
+# composer with the same accessible name, like X's /compose/post over /home.
+# Discard navigates to a page with only the inline composer.
+MODAL_JS = r"""
+const cfg = __CFG__;
+let state = '', media = 0, inlineState = '';
+const $ = (id) => document.getElementById(id);
+function update() { $('submit').disabled = state.trim() === '' && media === 0; }
+function inlineComposer() {
+  $('inline-slot').innerHTML =
+    '<section aria-label="Inline composer">' +
+    '<div id="inline" role="textbox" aria-label="Post text" contenteditable="true"></div>' +
+    '<button type="button" id="inline-post" disabled>Post</button></section>';
+  $('inline').addEventListener('input', () => {
+    inlineState = $('inline').innerText.trim(); $('inline-post').disabled = inlineState === ''; });
+  $('inline-post').addEventListener('click', () => fetch('/api/create', {method: 'POST',
+    headers: {'content-type': 'application/json'}, body: JSON.stringify({text: inlineState, media: 0, source: 'inline'})}));
+}
+if (cfg.inline === 'now') inlineComposer();
+if (cfg.inline === 'late') setTimeout(inlineComposer, 500);
+if (cfg.modal) {
+  $('editor').addEventListener('input', () => { state = $('editor').innerText.replace(/\n$/, ''); update(); });
+  $('add-photo').addEventListener('click', () => $('file').click());
+  $('file').addEventListener('change', () => {
+    const n = $('file').files.length;
+    setTimeout(() => {
+      media = n;
+      $('thumbs').innerHTML = '<img alt="Uploaded thumbnail" width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">';
+      update();
+    }, 300);
+  });
+  const leave = () => { location.href = cfg.home; };
+  $('close').addEventListener('click', () => { if (state || media) $('discard').hidden = false; else leave(); });
+  $('discard-yes').addEventListener('click', leave);
+  $('discard-no').addEventListener('click', () => { $('discard').hidden = true; });
+  $('submit').addEventListener('click', async () => {
+    $('submit').disabled = true;
+    const r = await fetch('/api/create', {method: 'POST', headers: {'content-type': 'application/json'},
+                                          body: JSON.stringify({text: state, media: media, source: 'dialog'})});
+    const j = await r.json();
+    const id = j && j.data && j.data.create && j.data.create.result && j.data.create.result.id;
+    if (id) {
+      $('modal').remove();
+      $('status').innerHTML = 'Your post was sent. <a href="/post/' + id + '">View post</a>';
+    }
+  });
+}
+"""
+
+MODAL_HTML = (
+    '<div id="modal" role="dialog" aria-label="Compose post" aria-modal="true" '
+    'style="position:fixed;top:30%;left:10%;right:10%;background:#fff;border:1px solid #888;z-index:5">'
+    '<div id="editor" role="textbox" aria-label="Post text" contenteditable="true" '
+    'style="min-height:60px;border:1px solid #888"></div>'
+    '<input type="file" id="file" style="display:none">'
+    '<button type="button" id="add-photo">Add photos or video</button><div id="thumbs"></div>'
+    '<button type="button" id="submit" disabled>Post</button>'
+    '<button type="button" id="close" aria-label="Close">x</button></div>'
+    '<div id="discard" role="alertdialog" aria-label="Discard post?" hidden '
+    'style="position:fixed;top:5%;left:30%;background:#fff;z-index:9"><p>Discard post?</p>'
+    '<button type="button" id="discard-yes">Discard</button>'
+    '<button type="button" id="discard-no">Keep editing</button></div>')
+
+
+def modal_page(modal=True, inline="none", home="/home-inline"):
+    cfg = json.dumps({"modal": modal, "inline": inline, "home": home})
+    return ('<!doctype html><html><head><meta charset="utf-8"><title>Compose Test</title></head><body>'
+            '<main><h1>Home</h1><div id="inline-slot"></div><p id="status" role="status"></p></main>'
+            + (MODAL_HTML if modal else '') + '<script>' + MODAL_JS.replace("__CFG__", cfg)
+            + '</script></body></html>')
+
+
 COMPOSE_PAGES = {
     "/compose": compose_page(overlay=True),
     "/compose-plain": compose_page(),
@@ -375,6 +447,11 @@ COMPOSE_PAGES = {
     "/compose-chooser": compose_page(media="chooser"),
     "/compose-late": compose_page(late_ms=3000),
     "/compose-injection": compose_page(injection=True),
+    "/compose-modal": modal_page(inline="now"),
+    "/compose-modal-only": modal_page(),
+    "/compose-modal-race": modal_page(home="/home-inline-late"),
+    "/home-inline": modal_page(modal=False, inline="now"),
+    "/home-inline-late": modal_page(modal=False, inline="late"),
 }
 
 

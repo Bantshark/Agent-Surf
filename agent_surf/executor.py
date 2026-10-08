@@ -17,6 +17,7 @@ Publishing boundary, enforced here:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -24,7 +25,7 @@ import unicodedata
 from typing import Any, Callable
 
 from agent_surf import actionmap, sitemap, sites
-from agent_surf.actionmap import PRESS_KEYS, SUBMIT_LABELS, Resolved, resolve_target, try_resolve
+from agent_surf.actionmap import PRESS_KEYS, SUBMIT_LABELS, Resolved, candidates, try_resolve
 from agent_surf.browser import ReadOnlyPage
 
 log = logging.getLogger("agent_surf.executor")
@@ -88,6 +89,28 @@ class ActionPage:
         self.read.goto(url)  # domain-locked before and after
 
 
+def _key(target: dict) -> str:
+    return json.dumps(target, sort_keys=True)
+
+
+def _alive(handle: Any, hidden_ok: bool = False) -> bool:
+    """Is a pinned element still on the page (and visible, unless hidden_ok)?
+    A detached element, or one from a page that navigated away, is not."""
+    if handle is None:
+        return False
+    try:
+        return bool(handle.evaluate("e => e.isConnected")) if hidden_ok else handle.is_visible()
+    except Exception:
+        return False
+
+
+def _contains(container: Any, el: Any) -> bool:
+    try:
+        return bool(container.evaluate("(c, el) => c.contains(el)", el))
+    except Exception:
+        return False
+
+
 def _label(loc: Any) -> str:
     try:
         return (loc.evaluate(
@@ -113,6 +136,11 @@ class StepRunner:
         self.step_timeout_s = STEP_TIMEOUT_S if step_timeout_s is None else step_timeout_s
         self.composing = False     # text is in the composer: no Enter, no submit-labelled clicks
         self.notes: list[str] = []
+        # Elements this run actually used, pinned for the rest of the run, so a
+        # look-alike elsewhere on the page (e.g. a timeline's inline composer
+        # with the same role and name) is never typed into or mistaken for it.
+        self.pins: dict[str, Any] = {}
+        self.composer: Any = None   # pinned composer container (map "composer")
         if not self.allows_submit:
             net = (amap.get("confirm") or {}).get("network")
             if net and net.get("url_regex"):
@@ -124,12 +152,109 @@ class StepRunner:
     def _guard(self) -> None:
         self.guard(self.page.read)
 
-    def _resolve(self, target: dict, where: Any, *, file_input: bool = False) -> Resolved:
-        r = resolve_target(self.raw, target, timeout_s=self.step_timeout_s,
-                           allow_hidden_file_input=file_input)
-        if r is None:
-            raise StepFailed(where, f"target not found: {target}")
-        return r
+    # -- composer container and pinned targets ------------------------------
+
+    def _composer_target(self) -> dict | None:
+        return (self.map.get("composer") or {}).get("target")
+
+    def _text_target(self) -> dict | None:
+        return next((s["target"] for s in self.map.get("steps", []) if s.get("op") == "type"), None)
+
+    def _pick_container(self) -> Any:
+        """A visible composer container that holds the map's text box (any
+        visible one if the map types nothing). None if there is none yet."""
+        text = self._text_target()
+        for c in candidates(self.raw, self._composer_target()):
+            handle = c.locator.element_handle()
+            if text is None or any(_contains(handle, t.locator.element_handle())
+                                   for t in candidates(self.raw, text)):
+                self.notes.append(f"composer container pinned (via {c.how})")
+                return handle
+        return None
+
+    def _container(self, where: Any, *, wait: bool = True) -> Any:
+        """The pinned composer container. Composer steps never run without it."""
+        if self.composer is not None:
+            if _alive(self.composer):
+                return self.composer
+            raise StepFailed(where, "the composer container is gone")
+        deadline = time.monotonic() + (self.step_timeout_s if wait else 0)
+        while True:
+            self.composer = self._pick_container()
+            if self.composer is not None:
+                return self.composer
+            if time.monotonic() >= deadline:
+                raise StepFailed(where, f"composer container not found: {self._composer_target()}")
+            self.raw.wait_for_timeout(250)
+
+    def _live_container(self) -> Any:
+        """The container if it is (or can now be) pinned and alive; never raises."""
+        if self.composer is None and self._composer_target():
+            self.composer = self._pick_container()
+        return self.composer if _alive(self.composer) else None
+
+    def _find(self, target: dict, scope: str, where: Any, file_input: bool) -> Resolved | None:
+        """One look, no waiting. scope "composer": only inside the container
+        (required when the map has one); "auto": inside the container first,
+        then page-wide (e.g. a confirm dialog outside the composer)."""
+        if self._composer_target():
+            container = self._container(where, wait=False) if scope == "composer" else self._live_container()
+            if container is not None:
+                for c in candidates(self.raw, target, allow_hidden_file_input=file_input):
+                    if _contains(container, c.locator.element_handle()):
+                        return Resolved(c.locator, c.how + " in composer")
+            if scope == "composer":
+                return None
+        return try_resolve(self.raw, target, allow_hidden_file_input=file_input)
+
+    def _resolve(self, target: dict, where: Any, *, scope: str = "auto", file_input: bool = False,
+                 wait: bool = True) -> Resolved:
+        """Resolve and pin. A pinned element is reused while it is alive."""
+        key = _key(target)
+        deadline = time.monotonic() + (self.step_timeout_s if wait else 0)
+        if scope == "composer" and self._composer_target():
+            self._container(where, wait=wait)  # waits for it; StepFailed if missing or gone
+        while True:
+            pin = self.pins.get(key)
+            if _alive(pin, hidden_ok=file_input):
+                return Resolved(pin, "pinned")
+            r = self._find(target, scope, where, file_input)
+            if r is not None:
+                handle = r.locator.element_handle()
+                if not self._composer_target() or r.how.endswith("in composer"):
+                    self.pins[key] = handle
+                return Resolved(handle, r.how)
+            if time.monotonic() >= deadline:
+                inside = " in the composer" if scope == "composer" and self._composer_target() else ""
+                raise StepFailed(where, f"target not found{inside}: {target}")
+            self.raw.wait_for_timeout(250)
+
+    def _gone(self, target: dict) -> bool:
+        """For "hidden" waits: the element this run used is detached or hidden,
+        or the composer container is gone. A different element elsewhere on the
+        page with the same role/name does not count."""
+        comp = self._composer_target()
+        if comp and self.composer is not None and not _alive(self.composer):
+            return True
+        if comp and _key(target) == _key(comp) and self.composer is not None:
+            return not _alive(self.composer)
+        pin = self.pins.get(_key(target))
+        if pin is not None:
+            return not _alive(pin)
+        if comp and self.composer is not None:  # never used: look only inside the live container
+            return all(not _contains(self.composer, c.locator.element_handle())
+                       for c in candidates(self.raw, target))
+        return try_resolve(self.raw, target) is None  # never used anywhere (legacy page-wide)
+
+    def composer_closed(self) -> bool:
+        """After discard: the composer this run used is closed."""
+        if self._composer_target():
+            return self.composer is not None and not _alive(self.composer)
+        for target in (self._text_target(), self.map["submit"]["target"]):
+            if target is not None and _key(target) in self.pins:
+                return not _alive(self.pins[_key(target)])
+        target = self._text_target() or self.map["submit"]["target"]
+        return try_resolve(self.raw, target) is None
 
     def _check_click_allowed(self, loc: Any, where: Any) -> None:
         label = _label(loc)
@@ -186,9 +311,9 @@ class StepRunner:
         self.raw.keyboard.press(key)
 
     def _submit_ready(self) -> bool:
-        r = try_resolve(self.raw, self.map["submit"]["target"])
         try:
-            return r is not None and r.locator.is_enabled()
+            r = self._resolve(self.map["submit"]["target"], "submit", scope="composer", wait=False)
+            return r.locator.is_enabled()
         except Exception:
             return False
 
@@ -215,7 +340,7 @@ class StepRunner:
         text = self.payload.get("text")
         if not text:
             raise StepFailed(where, "payload has no text")
-        loc = self._resolve(step["target"], where).locator
+        loc = self._resolve(step["target"], where, scope="composer").locator
         self.composing = True
         methods = (
             ("fill", lambda: loc.fill(text)),
@@ -237,7 +362,7 @@ class StepRunner:
         files = self.payload.get("media") or []
         if not files:
             return  # optional: nothing to attach
-        r = self._resolve(step["target"], where, file_input=True)
+        r = self._resolve(step["target"], where, scope="composer", file_input=True)
         is_input = r.locator.evaluate("e => e.tagName === 'INPUT' && e.type === 'file'")
         try:
             if is_input:
@@ -267,7 +392,7 @@ class StepRunner:
         state = step.get("state", "visible")
         if state == "hidden":
             deadline = time.monotonic() + self.step_timeout_s
-            while try_resolve(self.raw, step["target"]) is not None:
+            while not self._gone(step["target"]):
                 if time.monotonic() >= deadline:
                     raise StepFailed(where, f"still visible: {step['target']}")
                 self.raw.wait_for_timeout(200)
@@ -331,7 +456,7 @@ class StepRunner:
 
     def _checked_submit(self) -> tuple[Resolved, str]:
         sub = self.map["submit"]
-        r = self._resolve(sub["target"], "submit")
+        r = self._resolve(sub["target"], "submit", scope="composer")
         label = _label(r.locator)
         allowed = set(sub.get("label_allowlist") or ()) & set(SUBMIT_LABELS.get(self.map["action"], ()))
         if label not in allowed:
