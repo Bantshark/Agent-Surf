@@ -41,6 +41,17 @@ CREATE TABLE IF NOT EXISTS action_maps (
     created_at TEXT NOT NULL,
     PRIMARY KEY (site, action, version)
 );
+-- v2: one row per publish attempt: dispatch, submit and completion recorded separately
+CREATE TABLE IF NOT EXISTS dispatch_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    queue_id INTEGER NOT NULL,
+    site TEXT NOT NULL,
+    action TEXT NOT NULL,
+    dispatched_at TEXT NOT NULL,
+    submitted_at TEXT,
+    completed_at TEXT,
+    outcome TEXT
+);
 -- v2: publishing queue (see outbox.py)
 CREATE TABLE IF NOT EXISTS queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
