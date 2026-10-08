@@ -10,6 +10,8 @@ deciding whether to relearn is the caller's job.
 from __future__ import annotations
 
 import logging
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -25,6 +27,9 @@ Guard = Callable[[ReadOnlyPage], None]
 DRIFT_RUNS = 3            # warn when the fingerprint differs this many runs in a row
 HEALTH_MIN_ITEMS = 0.5    # first pass below this share of the dry-run count -> warn
 HEALTH_MIN_COMPLETE = 0.8 # below this share of items with all required fields -> warn
+FIRST_PASS_TIMEOUT_S = 15.0  # ceiling on waiting for a cold page's feed or items to appear
+FIRST_PASS_POLL_S = 0.5
+FIRST_PASS_ATTEMPTS = 2      # first-pass tries (delay_s apart) before MapBroken
 
 
 class NoMap(RuntimeError):
@@ -99,6 +104,36 @@ def health_problems(batch: list[dict], required: list[str], dry_run_items: int |
     return problems
 
 
+def content_ready(m: dict, source: str, page: ReadOnlyPage, since_seq: int) -> bool:
+    """Has this source's content arrived: a response matching url_regex since
+    ``since_seq`` (network), or at least one dom.item element (dom)?"""
+    if source == "network":
+        rx = re.compile(m["network"]["url_regex"])
+        return any(rx.search(r.url) for r in page.buffer.since(since_seq))
+    return bool(page.dom_items(m["dom"]))
+
+
+def wait_for_content(m: dict, page: ReadOnlyPage, since_seq: int, guard: Guard,
+                     timeout_s: float | None = None) -> str | None:
+    """Poll until any of the map's sources has content; return that source, or
+    None after the timeout. Runs the challenge guard on every poll; time spent
+    in a challenge does not count against the timeout."""
+    timeout_s = FIRST_PASS_TIMEOUT_S if timeout_s is None else timeout_s
+    sources = [m["source"]] + [s for s in sitemap.SOURCES if s != m["source"] and s in m]
+    deadline = time.monotonic() + timeout_s
+    while True:
+        for source in sources:
+            if content_ready(m, source, page, since_seq):
+                return source
+        if time.monotonic() >= deadline:
+            log.warning("no content from %s after %.0f s", " or ".join(sources), timeout_s)
+            return None
+        page.wait(FIRST_PASS_POLL_S)
+        started = time.monotonic()
+        guard(page)
+        deadline += time.monotonic() - started
+
+
 def run(store: Store, page: ReadOnlyPage, site: str, page_type: str, *,
         query: str | None = None, handle: str | None = None, guard: Guard | None = None) -> RunResult:
     m = load_current_map(store, site, page_type)
@@ -116,11 +151,12 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
     sources = [m["source"]] + [s for s in sitemap.SOURCES if s != m["source"] and s in m]
 
     result = RunResult()
-    cursor = page.buffer.last_seq
+    cursor = start_seq = page.buffer.last_seq
     page.goto(url)
     guard(page)
     page.wait(delay)
     guard(page)
+    wait_for_content(m, page, start_seq, guard)
 
     click_selectors = list(m.get("click") or [])
 
@@ -163,16 +199,28 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
     for i in range(max_scrolls + 1):
         if chosen is None:
             batch: list[dict] = []
-            for source in sources:
-                batch = pass_items(source)
-                if any(it["item_id"] for it in batch):
-                    chosen = source
+            broken = ""
+            for attempt in range(FIRST_PASS_ATTEMPTS):
+                if attempt:
+                    page.wait(delay)
+                    guard(page)
+                cursor = start_seq  # every attempt sees all responses since navigation
+                chosen = None
+                for source in sources:
+                    batch = pass_items(source)
+                    if any(it["item_id"] for it in batch):
+                        chosen = source
+                        break
+                if chosen is None:
+                    broken = "first pass found no items with ids"
+                    continue
+                required = required_for(m, chosen)
+                if any(it["item_id"] and sitemap.has_required(it["fields"], required) for it in batch):
+                    broken = ""
                     break
-            if chosen is None:
-                raise MapBroken("first pass found no items with ids", m)
-            required = required_for(m, chosen)
-            if not any(it["item_id"] and sitemap.has_required(it["fields"], required) for it in batch):
-                raise MapBroken(f"every item misses a required field ({', '.join(required)})", m)
+                broken = f"every item misses a required field ({', '.join(required)})"
+            if broken:
+                raise MapBroken(broken, m)
             result.source = chosen
             row = store.map_row(site, page_type, m["version"]) if "version" in m else None
             problems = health_problems(batch, required, row["dry_run_items"] if row else None)

@@ -43,7 +43,14 @@ from agent_surf.browser import ReadOnlyPage  # noqa: E402
 from agent_surf.store import Store  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
-FEED_SITE = sites.Site("feedtest", ("feed.test",), {"home": "https://feed.test/", "more": "https://feed.test/more"})
+FEED_SITE = sites.Site("feedtest", ("feed.test",), {
+    "home": "https://feed.test/",
+    "more": "https://feed.test/more",
+    "late": "https://feed.test/late",
+    "latedom": "https://feed.test/late-dom",
+    "never": "https://feed.test/never",
+    "latechallenge": "https://feed.test/late-challenge",
+})
 
 
 @pytest.fixture(autouse=True)

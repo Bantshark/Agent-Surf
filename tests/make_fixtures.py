@@ -95,6 +95,44 @@ load();
 """ % {"pages": PAGES}
 
 
+# Cold start: the page's own script requests the feed (or renders items) only
+# after a delay, like a site app booting in a freshly started browser. HAR replay
+# answers instantly, so the delay has to come from the page.
+LATE_MS = 3000
+LATE_HTML = FEED_HTML.replace("\nload();\n", "\nsetTimeout(load, %d);\n" % LATE_MS)
+assert LATE_HTML != FEED_HTML
+
+LATE_DOM_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Feed Test</title></head>
+<body><main id="feed"><h1>Synthetic feed</h1></main>
+<script>
+setTimeout(() => {
+  const feed = document.getElementById('feed');
+  for (let i = 1; i <= 5; i++) {
+    const a = document.createElement('article');
+    a.setAttribute('data-post-id', 'p' + i);
+    a.innerHTML = '<p class="text">Synthetic post ' + i + '</p><a class="author" href="#">user</a>';
+    feed.appendChild(a);
+  }
+}, %(late)d);
+</script></body></html>
+""" % {"late": LATE_MS}
+
+# The feed is never requested and no items ever render.
+NEVER_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Feed Test</title></head>
+<body><main id="feed"><h1>Synthetic feed</h1><p>Loading...</p></main></body></html>
+"""
+
+# A checkpoint appears while the app is still loading, is cleared (as if the
+# human solved it), then the feed loads.
+LATE_CHALLENGE_HTML = FEED_HTML.replace("\nload();\n", """
+setTimeout(() => history.replaceState(null, '', '/checkpoint/verify'), 1500);
+setTimeout(() => { history.replaceState(null, '', '/late-challenge'); load(); }, 3500);
+""")
+assert LATE_CHALLENGE_HTML != FEED_HTML
+
+
 def feed_page(n):
     edges = []
     for k in range(PER_PAGE):
@@ -129,6 +167,10 @@ def har(entries):
 def build_feed():
     entries = [entry(ORIGIN + "/", "text/html; charset=utf-8", FEED_HTML),
                entry(ORIGIN + "/more", "text/html; charset=utf-8", MORE_HTML),
+               entry(ORIGIN + "/late", "text/html; charset=utf-8", LATE_HTML),
+               entry(ORIGIN + "/late-dom", "text/html; charset=utf-8", LATE_DOM_HTML),
+               entry(ORIGIN + "/never", "text/html; charset=utf-8", NEVER_HTML),
+               entry(ORIGIN + "/late-challenge", "text/html; charset=utf-8", LATE_CHALLENGE_HTML),
                entry(ORIGIN + "/api/config", "application/json",
                      json.dumps({"features": {"dark_mode": True}}))]
     for n in range(1, PAGES + 1):
