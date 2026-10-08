@@ -40,6 +40,17 @@ def unregister_site(name: str) -> None:
     SITES.pop(name, None)
 
 
+# Where learn-action opens a composer for a new post. Replies, comments and DMs
+# start from the queue item's / learn-action's --target or --thread URL.
+ACTION_START: dict[str, dict[str, str]] = {
+    "x": {"post": "https://x.com/compose/post"},
+    "reddit": {"post": "https://www.reddit.com/submit"},
+    "instagram": {"post": "https://www.instagram.com/"},
+    "facebook": {"post": "https://www.facebook.com/"},
+    "linkedin": {"post": "https://www.linkedin.com/feed/"},
+}
+
+
 def get_site(name: str) -> Site:
     try:
         return SITES[name]
