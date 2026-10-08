@@ -1,6 +1,8 @@
 """Command line: python -m agent_surf <command>.
 
-Results go to stdout (a JSON array with --json); logs go to stderr.
+Results go to stdout (JSON with --json, on every command); logs go to stderr.
+Exit codes: 0 ok, 1 error, 2 usage, 3 CAPTCHA not cleared, 4 map broken and no
+API key, 5 publish refused (not attempted), 6 publish needs attention.
 """
 
 from __future__ import annotations
@@ -21,11 +23,21 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_CHALLENGE = 3
 EXIT_MAP_BROKEN = 4
+EXIT_PUBLISH_REFUSED = 5    # not attempted: not approved, content changed, no action map, caps
+EXIT_NEEDS_ATTENTION = 6    # attempted, not confirmed published: see `queue show <id>`
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agent-surf", description="Local agent browser with interface memory.")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", help="print the result as JSON")
     sub = p.add_subparsers(dest="command", required=True)
+    _add = sub.add_parser
+
+    def add_parser(name: str, **kw: Any) -> argparse.ArgumentParser:
+        return _add(name, parents=[common], **kw)
+
+    sub.add_parser = add_parser  # every command gets --json
 
     sub.add_parser("chrome", help="print the command to start Chrome with a dedicated profile")
 
@@ -39,12 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
     target_args(sub.add_parser("learn", help="ask the model to write a map for a page"))
     run = sub.add_parser("run", help="replay a map and print new items (no model calls)")
     target_args(run)
-    run.add_argument("--json", action="store_true", help="print new items as a JSON array")
 
     maps = sub.add_parser("maps", help="list or show learned maps")
     msub = maps.add_subparsers(dest="maps_command", required=True)
-    msub.add_parser("list")
-    show = msub.add_parser("show")
+    msub.add_parser("list", parents=[common])
+    show = msub.add_parser("show", parents=[common])
     show.add_argument("site")
     show.add_argument("page_type")
 
@@ -52,11 +63,50 @@ def build_parser() -> argparse.ArgumentParser:
     yt.add_argument("target", help="YouTube URL or ytsearchN:query")
     yt.add_argument("--subs", action="store_true", help="include subtitles")
     yt.add_argument("--comments", action="store_true", help="include comments (best-effort)")
-    yt.add_argument("--json", action="store_true", help="print new items as a JSON array")
 
     scrub = sub.add_parser("scrub", help="strip cookies/auth from a HAR file")
     scrub.add_argument("src")
     scrub.add_argument("dst")
+
+    # v2: write layer
+    la = sub.add_parser("learn-action", help="learn a composer once (rehearsed, never submitted)")
+    la.add_argument("site")
+    la.add_argument("action", choices=["post", "reply", "dm", "comment"])
+    la.add_argument("--target", help="post URL to reply to / comment on")
+    la.add_argument("--thread", help="conversation URL for dm")
+    la.add_argument("--start", help="composer URL, overriding the site default for posts")
+
+    q = sub.add_parser("queue", help="add, review, approve or reject what will be published")
+    qsub = q.add_subparsers(dest="queue_command", required=True)
+    qa = qsub.add_parser("add", parents=[common], help="add a draft")
+    qa.add_argument("site")
+    qa.add_argument("action", choices=["post", "reply", "dm", "comment"])
+    qa.add_argument("--text")
+    qa.add_argument("--media", nargs="+", default=[], metavar="FILE")
+    qa.add_argument("--target", help="post URL (reply, comment)")
+    qa.add_argument("--thread", help="conversation URL (dm)")
+    qa.add_argument("--at", help="ISO 8601 time to publish (no offset = local time)")
+    qa.add_argument("--missed", choices=["skip", "run", "ask"], default="ask",
+                    help="if the machine was asleep at --at (default ask)")
+    ql = qsub.add_parser("list", parents=[common])
+    ql.add_argument("--status")
+    qs = qsub.add_parser("show", parents=[common])
+    qs.add_argument("id", type=int)
+    qp = qsub.add_parser("approve", parents=[common], help="freeze the content and allow publishing")
+    g = qp.add_mutually_exclusive_group(required=True)
+    g.add_argument("id", type=int, nargs="?")
+    g.add_argument("--all-drafts", action="store_true")
+    qr = qsub.add_parser("reject", parents=[common])
+    qr.add_argument("id", type=int)
+
+    pub = sub.add_parser("publish", help="publish one approved queue item and read back its receipt")
+    pub.add_argument("id", type=int)
+    d = sub.add_parser("dispatch", help="publish due approved items every 30 s")
+    d.add_argument("--once", action="store_true", help="one tick, then exit")
+    ib = sub.add_parser("inbox", help="new notifications/messages (zero model calls)")
+    ib.add_argument("site")
+    ib.add_argument("page_type")
+    sub.add_parser("receipts", help="published items and their receipts")
     return p
 
 
@@ -79,8 +129,20 @@ def make_client(cfg: config.Config) -> Any:
     return anthropic.Anthropic()  # reads ANTHROPIC_API_KEY itself; never logged here
 
 
+def emit(args: argparse.Namespace, data: Any, text: str | None = None) -> None:
+    """--json prints data; otherwise the human text (if any)."""
+    if getattr(args, "json", False):
+        print(json.dumps(data, ensure_ascii=False, indent=1))
+    elif text is not None:
+        print(text)
+
+
 def cmd_chrome(cfg: config.Config, args: argparse.Namespace) -> int:
-    print(chrome_instructions(cfg.home, cfg.cdp_url))
+    from agent_surf.browser import chrome_command
+
+    emit(args, {"command": chrome_command(cfg.home, cfg.cdp_url),
+                "warning": "the debugging port gives local processes full control of that profile"},
+         chrome_instructions(cfg.home, cfg.cdp_url))
     return EXIT_OK
 
 
@@ -98,6 +160,7 @@ def cmd_learn(cfg: config.Config, args: argparse.Namespace) -> int:
                           model=cfg.model, maps_dir=cfg.maps_dir, query=args.query,
                           handle=args.handle, guard=challenge.make_guard())
     log.info("learned %s %s v%d (source: %s)", args.site, args.page_type, m["version"], m["source"])
+    emit(args, m)
     return EXIT_OK
 
 
@@ -127,11 +190,11 @@ def cmd_run(cfg: config.Config, args: argparse.Namespace) -> int:
 def cmd_maps(cfg: config.Config, args: argparse.Namespace) -> int:
     with Store(cfg.db_path) as store:
         if args.maps_command == "list":
-            rows = store.list_maps()
+            rows = [dict(r) for r in store.list_maps()]
             if not rows:
                 log.info("no maps yet; run: agent-surf learn <site> <page_type>")
-            for r in rows:
-                print(f"{r['site']}\t{r['page_type']}\tv{r['version']}\t{r['created_at']}\t{r['path']}")
+            emit(args, rows, "\n".join(f"{r['site']}\t{r['page_type']}\tv{r['version']}\t{r['created_at']}"
+                                       f"\t{r['path']}" for r in rows) or None)
             return EXIT_OK
         row = store.current_map(args.site, args.page_type)
         if row is None:
@@ -157,11 +220,172 @@ def cmd_scrub(cfg: config.Config, args: argparse.Namespace) -> int:
     stats = har_scrub.scrub_file(args.src, args.dst)
     log.info("scrubbed %s -> %s: removed %d header(s), %d cookie(s); redacted %d param(s), %d body(ies)",
              args.src, args.dst, stats.headers, stats.cookies, stats.params, stats.bodies)
+    emit(args, {"headers": stats.headers, "cookies": stats.cookies, "params": stats.params,
+                "bodies": stats.bodies})
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# v2: write layer
+
+def _item_line(item: dict) -> str:
+    p = item["payload"]
+    what = (p.get("text") or "").replace("\n", " ")[:60] + (f" [+{len(p['media'])} media]" if p.get("media") else "")
+    when = item["scheduled_at"] or "-"
+    return f"{item['id']}\t{item['status']}\t{item['site']} {item['action']}\t{when}\t{what}"
+
+
+def _publish_one(cfg: config.Config, store: Store, item_id: int) -> Any:
+    """Publish one item in its own browser session; its tabs close afterwards."""
+    from agent_surf import publisher
+    from agent_surf.executor import ActionPage
+
+    with BrowserSession(cdp_endpoint(cfg)) as session:
+        def open_page(site: sites.Site) -> ActionPage:
+            return ActionPage(session.open_tab(), site)
+        return publisher.publish(store, open_page, item_id, client=make_client(cfg), model=cfg.model,
+                                 maps_dir=cfg.maps_dir, guard=challenge.make_guard())
+
+
+def cmd_learn_action(cfg: config.Config, args: argparse.Namespace) -> int:
+    from agent_surf import action_learner
+    from agent_surf.executor import ActionPage
+
+    site = sites.get_site(args.site)
+    client = make_client(cfg)
+    if client is None:
+        log.error("learn-action needs ANTHROPIC_API_KEY in the environment")
+        return EXIT_ERROR
+    with Store(cfg.db_path) as store, BrowserSession(cdp_endpoint(cfg)) as session:
+        try:
+            m = action_learner.learn_action(
+                store, ActionPage(session.open_tab(), site), args.site, args.action, client=client,
+                model=cfg.model, maps_dir=cfg.maps_dir, target_url=args.target, thread_url=args.thread,
+                start_url=args.start, guard=challenge.make_guard())
+        except action_learner.ActionLearnError as e:
+            log.error("%s", e)
+            return EXIT_ERROR
+    log.info("learned %s %s action map v%d (rehearsed, nothing published)", args.site, args.action, m["version"])
+    emit(args, m)
+    return EXIT_OK
+
+
+def cmd_queue(cfg: config.Config, args: argparse.Namespace) -> int:
+    from agent_surf import outbox
+
+    with Store(cfg.db_path) as store:
+        c = args.queue_command
+        if c == "add":
+            payload = {k: v for k, v in (("text", args.text), ("media", args.media),
+                                         ("target_url", args.target), ("thread_url", args.thread)) if v}
+            qid = outbox.add(store, args.site, args.action, payload, scheduled_at=args.at,
+                             missed_policy=args.missed)
+            item = outbox.get(store, qid)
+            log.info("added draft %d; review it, then: agent-surf queue approve %d", qid, qid)
+            emit(args, item, str(qid))
+        elif c == "list":
+            items = outbox.list_items(store, args.status)
+            emit(args, items, "\n".join(_item_line(i) for i in items) or None)
+        elif c == "show":
+            item = outbox.get(store, args.id)
+            emit(args, item, json.dumps(item, ensure_ascii=False, indent=1))
+        elif c == "approve":
+            items = outbox.approve_all_drafts(store) if args.all_drafts else [outbox.approve(store, args.id)]
+            log.info("approved %d item(s); content is frozen (content_hash)", len(items))
+            emit(args, items, "\n".join(_item_line(i) for i in items) or None)
+        elif c == "reject":
+            item = outbox.reject(store, args.id)
+            emit(args, item, _item_line(item))
+    return EXIT_OK
+
+
+def cmd_publish(cfg: config.Config, args: argparse.Namespace) -> int:
+    from agent_surf import publisher
+
+    with Store(cfg.db_path) as store:
+        try:
+            result = _publish_one(cfg, store, args.id)
+        except publisher.PublishRefused as e:
+            log.error("not published: %s", e)
+            emit(args, {"id": args.id, "status": "refused", "reason": str(e)})
+            return EXIT_PUBLISH_REFUSED
+    item = result.item
+    emit(args, item, _item_line(item) + (f"\t{item['receipt']['permalink']}" if item["receipt"] else ""))
+    if item["status"] != "published":
+        log.error("queue item %d needs attention: %s", item["id"], item["last_error"])
+        return EXIT_NEEDS_ATTENTION
+    return EXIT_OK
+
+
+def cmd_dispatch(cfg: config.Config, args: argparse.Namespace) -> int:
+    from agent_surf import dispatcher, publisher
+    from agent_surf.executor import ActionPage
+
+    with Store(cfg.db_path) as store:
+        def recover() -> None:
+            if not outbox_has(store, "publishing"):
+                return
+            with BrowserSession(cdp_endpoint(cfg)) as session:
+                publisher.recover_publishing(store, lambda site: ActionPage(session.open_tab(), site))
+
+        def on_tick(report: Any) -> None:
+            data = {"at": report.at, "resumed": report.resumed, "missed": report.missed,
+                    "published": report.published, "not_published": report.not_published}
+            if args.json:
+                print(json.dumps(data, ensure_ascii=False), flush=True)
+            elif report.published or report.missed or report.not_published:
+                log.info("tick %s: %s", report.at, data)
+
+        try:
+            dispatcher.run(store, lambda i: _publish_one(cfg, store, i), recover_fn=recover,
+                           notify=challenge.make_notifier(), once=args.once, on_tick=on_tick)
+        except KeyboardInterrupt:
+            log.info("dispatcher stopped")
+    return EXIT_OK
+
+
+def outbox_has(store: Store, status: str) -> bool:
+    return store.conn.execute("SELECT 1 FROM queue WHERE status = ? LIMIT 1", (status,)).fetchone() is not None
+
+
+def cmd_inbox(cfg: config.Config, args: argparse.Namespace) -> int:
+    from agent_surf import inbox, runner
+
+    site = sites.get_site(args.site)
+    if args.page_type not in sites.INBOX_PAGE_TYPES.get(args.site, set()):
+        log.error("%s %s is not an inbox page; inbox pages: %s", args.site, args.page_type,
+                  ", ".join(sorted(sites.INBOX_PAGE_TYPES.get(args.site, set()))) or "none")
+        return EXIT_ERROR
+    with Store(cfg.db_path) as store:
+        runner.load_current_map(store, args.site, args.page_type)
+        with BrowserSession(cdp_endpoint(cfg)) as session:
+            try:
+                result = inbox.run_inbox(store, session.new_page(site), args.site, args.page_type,
+                                         client=make_client(cfg), model=cfg.model, maps_dir=cfg.maps_dir,
+                                         guard=challenge.make_guard())
+            except runner.MapBroken as e:
+                log.error("map broken: %s", e.reason)
+                return EXIT_MAP_BROKEN
+    print_items(result.items, args.json)
+    log.info("%d new item(s)", len(result.items))
+    return EXIT_OK
+
+
+def cmd_receipts(cfg: config.Config, args: argparse.Namespace) -> int:
+    from agent_surf import outbox
+
+    with Store(cfg.db_path) as store:
+        rows = [{"id": i["id"], "site": i["site"], "action": i["action"], **(i["receipt"] or {})}
+                for i in outbox.list_items(store, "published")]
+    emit(args, rows, "\n".join(f"{r['id']}\t{r['site']} {r['action']}\t{r.get('post_id')}\t"
+                               f"{r.get('confirmed_at')}\t{r.get('permalink')}" for r in rows) or None)
     return EXIT_OK
 
 
 COMMANDS = {"chrome": cmd_chrome, "learn": cmd_learn, "run": cmd_run, "maps": cmd_maps,
-            "youtube": cmd_youtube, "scrub": cmd_scrub}
+            "youtube": cmd_youtube, "scrub": cmd_scrub, "learn-action": cmd_learn_action,
+            "queue": cmd_queue, "publish": cmd_publish, "dispatch": cmd_dispatch, "inbox": cmd_inbox,
+            "receipts": cmd_receipts}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -185,7 +409,7 @@ def main(argv: list[str] | None = None) -> int:
 
         known = (BrowserError, sites.DomainRefused, sites.UnknownSite, sitemap.MapError,
                  runner.NoMap, learner.LearnError, learner.HealFailed, youtube.YouTubeError,
-                 ValueError, OSError)
+                 ValueError, OSError)  # QueueError/IllegalTransition/ActionMapError are ValueErrors
         if isinstance(e, known):
             log.error("%s", e)
             return EXIT_ERROR
