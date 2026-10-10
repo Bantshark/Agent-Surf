@@ -2,6 +2,7 @@
 HAR-backed compose.test context)."""
 
 import json
+import os
 
 import pytest
 
@@ -102,7 +103,7 @@ def test_publish_needs_attention_exit_code(home, session, capsys):
 
 def test_approve_all_reject_show(home, capsys, tmp_path):
     img = tmp_path / "a.png"
-    img.write_bytes(b"\x89PNG x")
+    img.write_bytes(b"\x89PNG\r\n\x1a\n x")
     ids = [json.loads(run(capsys, "queue", "add", "x", "post", "--text", f"t{i}", "--json")[1])["id"]
            for i in range(2)]
     mid = json.loads(run(capsys, "queue", "add", "x", "reply", "--text", "r", "--media", str(img),
@@ -114,7 +115,7 @@ def test_approve_all_reject_show(home, capsys, tmp_path):
     code, out, _ = run(capsys, "queue", "show", str(mid), "--json")
     shown = json.loads(out)
     assert shown["scheduled_at"] == "2026-11-01T09:00:00+00:00" and shown["missed_policy"] == "skip"
-    assert shown["payload"]["media"] == [str(img.resolve())]
+    assert shown["payload"]["media"] == [os.path.abspath(img)]
     code, out, _ = run(capsys, "queue", "list")
     assert len(out.strip().splitlines()) == 3
     code, _, err = run(capsys, "queue", "approve", str(ids[0]))

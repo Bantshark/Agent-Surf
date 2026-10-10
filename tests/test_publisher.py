@@ -95,9 +95,9 @@ def test_refuses_when_media_changed_after_approval(store, site, tmp_path):
     backend, open_page, save_map, add_item = site
     save_map()
     img = tmp_path / "a.png"
-    img.write_bytes(b"\x89PNG one")
+    img.write_bytes(b"\x89PNG\r\n\x1a\n one")
     qid = add_item(media=[str(img)])
-    img.write_bytes(b"\x89PNG two")
+    img.write_bytes(b"\x89PNG\r\n\x1a\n two")
     with pytest.raises(PublishRefused, match="content changed"):
         publish(store, open_page, qid)
     assert outbox.get(store, qid)["status"] == "needs_attention"

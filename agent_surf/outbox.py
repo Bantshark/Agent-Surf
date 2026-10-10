@@ -57,14 +57,68 @@ def parse_time(value: str) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
-def check_media(paths: list[str]) -> None:
+# Fix 12: what may be attached. Extension AND magic bytes must agree.
+MAX_MEDIA = 4
+IMAGE_MAX_BYTES = 15 * 1024 * 1024
+VIDEO_MAX_BYTES = 512 * 1024 * 1024
+MEDIA_TYPES = {  # extension -> (mime type, magic kind)
+    ".jpg": ("image/jpeg", "jpeg"), ".jpeg": ("image/jpeg", "jpeg"), ".png": ("image/png", "png"),
+    ".gif": ("image/gif", "gif"), ".webp": ("image/webp", "webp"),
+    ".mp4": ("video/mp4", "isobmff"), ".mov": ("video/quicktime", "isobmff"), ".webm": ("video/webm", "ebml"),
+}
+
+
+def sniff(head: bytes) -> str | None:
+    """Kind of media from its first bytes, or None."""
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if head[4:8] == b"ftyp":
+        return "isobmff"   # MP4 / MOV
+    if head.startswith(b"\x1aE\xdf\xa3"):
+        return "ebml"      # WebM
+    return None
+
+
+def check_media(paths: list[str]) -> list[dict]:
+    """Every media file must be a regular file (not a symlink) of an allowed type
+    whose extension matches its content, within the size cap; at most MAX_MEDIA.
+    Returns path, type, size and sha256 per file."""
+    if len(paths) > MAX_MEDIA:
+        raise QueueError(f"at most {MAX_MEDIA} media files per item (got {len(paths)})")
+    info = []
     for p in paths:
         try:
-            st = os.stat(p)
+            st = os.lstat(p)
         except OSError:
             raise QueueError(f"media file not found: {p}") from None
+        if stat.S_ISLNK(st.st_mode):
+            raise QueueError(f"media may not be a symlink: {p}")
         if not stat.S_ISREG(st.st_mode):
             raise QueueError(f"media is not a regular file: {p}")
+        ext = Path(p).suffix.lower()
+        if ext not in MEDIA_TYPES:
+            raise QueueError(f"unsupported media type {ext or '(none)'}: {p} "
+                             f"(allowed: {', '.join(sorted(MEDIA_TYPES))})")
+        mime, kind = MEDIA_TYPES[ext]
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            head = f.read(32)
+            h.update(head)
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+        if sniff(head) != kind:
+            raise QueueError(f"media content does not match its extension {ext}: {p}")
+        cap = VIDEO_MAX_BYTES if mime.startswith("video/") else IMAGE_MAX_BYTES
+        if st.st_size > cap:
+            raise QueueError(f"media too large ({st.st_size} bytes, max {cap}): {p}")
+        info.append({"path": p, "type": mime, "size": st.st_size, "sha256": h.hexdigest()})
+    return info
 
 
 def normalize_payload(site: str, action: str, payload: dict) -> dict:
@@ -84,7 +138,8 @@ def normalize_payload(site: str, action: str, payload: dict) -> dict:
     if not isinstance(media, list) or not all(isinstance(m, str) and m for m in media):
         raise QueueError("media must be a list of file paths")
     if media:
-        out["media"] = [str(Path(m).expanduser().resolve()) for m in media]
+        # abspath, not resolve(): a symlink must stay visible to check_media
+        out["media"] = [os.path.abspath(Path(m).expanduser()) for m in media]
         check_media(out["media"])
     if not out:
         raise QueueError("a queue item needs text and/or media")

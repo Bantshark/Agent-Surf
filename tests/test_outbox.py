@@ -14,7 +14,7 @@ from agent_surf.store import Store
 @pytest.fixture
 def img(tmp_path):
     p = tmp_path / "photo.png"
-    p.write_bytes(b"\x89PNG synthetic image bytes")
+    p.write_bytes(b"\x89PNG\r\n\x1a\n synthetic image bytes")
     return p
 
 
@@ -24,7 +24,7 @@ def test_add_and_approve_records_hash(store, img):
     item = outbox.get(store, qid)
     assert item["status"] == "draft" and item["content_hash"] is None
     assert item["scheduled_at"] == "2026-11-01T07:00:00+00:00" and item["missed_policy"] == "skip"
-    assert item["payload"]["media"] == [str(img.resolve())]
+    assert item["payload"]["media"] == [str(img)]
     item = outbox.approve(store, qid)
     assert item["status"] == "approved" and item["approved_at"]
     assert item["content_hash"] == outbox.content_hash(item["payload"])
@@ -34,9 +34,9 @@ def test_add_and_approve_records_hash(store, img):
 def test_hash_covers_payload_and_media_bytes(store, img):
     qid = outbox.add(store, "x", "post", {"text": "t", "media": [str(img)]})
     item = outbox.approve(store, qid)
-    img.write_bytes(b"\x89PNG different bytes")
+    img.write_bytes(b"\x89PNG\r\n\x1a\n different bytes")
     assert "content_hash mismatch" in outbox.verify_approved(outbox.get(store, qid))
-    img.write_bytes(b"\x89PNG synthetic image bytes")
+    img.write_bytes(b"\x89PNG\r\n\x1a\n synthetic image bytes")
     assert outbox.verify_approved(outbox.get(store, qid)) is None
     payload = dict(item["payload"], text="edited after approval")
     store.conn.execute("UPDATE queue SET payload_json = ? WHERE id = ?", (json.dumps(payload), qid))

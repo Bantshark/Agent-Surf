@@ -294,7 +294,15 @@ def cmd_queue(cfg: config.Config, args: argparse.Namespace) -> int:
             emit(args, items, "\n".join(_item_line(i) for i in items) or None)
         elif c == "show":
             item = outbox.get(store, args.id)
-            emit(args, item, json.dumps(item, ensure_ascii=False, indent=1))
+            try:
+                media = outbox.check_media(item["payload"].get("media") or [])
+            except outbox.QueueError as e:
+                media = [{"error": str(e)}]
+            item["media_info"] = media
+            lines = [json.dumps({k: v for k, v in item.items() if k != "media_info"}, ensure_ascii=False, indent=1)]
+            lines += [f"media[{i}]: {m['path']}\t{m['type']}\t{m['size']} bytes\tsha256:{m['sha256'][:12]}"
+                      if "path" in m else f"media: {m['error']}" for i, m in enumerate(media)]
+            emit(args, item, "\n".join(lines))
         elif c == "approve":
             items = outbox.approve_all_drafts(store) if args.all_drafts else [outbox.approve(store, args.id)]
             log.info("approved %d item(s); content is frozen (content_hash)", len(items))
