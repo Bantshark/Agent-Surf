@@ -16,7 +16,7 @@ import re
 import time
 from typing import Any
 
-from agent_surf import runner, sitemap, sites
+from agent_surf import challenge, runner, sitemap, sites
 from agent_surf.browser import CapturedResponse, ReadOnlyPage
 from agent_surf.runner import Guard, MapBroken, RunResult
 from agent_surf.store import Store, now_iso
@@ -271,6 +271,7 @@ def learn(store: Store, page: ReadOnlyPage, site: str, page_type: str, *, client
     guard(page)
     page.check_domain()
 
+    challenge.ensure_logged_in(page)   # never send a login wall to the model
     aria = page.aria_snapshot()
     prompt = build_prompt(site, page_type, url, aria, page.buffer.all(), old_map, broken_reason)
     log.info("asking %s for a %s %s map", model, site, page_type)
@@ -314,6 +315,7 @@ def run_with_heal(store: Store, page: ReadOnlyPage, site: str, page_type: str, *
     try:
         return runner.run(store, page, site, page_type, **kw)
     except MapBroken as e:
+        challenge.ensure_logged_in(page)   # a login wall is never relearned
         if client is None:
             raise
         log.warning("map broken (%s); relearning once", e.reason)

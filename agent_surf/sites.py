@@ -73,6 +73,43 @@ ACTION_START: dict[str, dict[str, str]] = {
 }
 
 
+# Fix 22: a login wall is not a broken map. Path patterns match the URL path
+# exactly or as a prefix followed by "/"; title markers match the start of the
+# lower-cased page title. Data only; challenge.detect_logged_out applies them.
+@dataclass(frozen=True)
+class LoggedOutMarkers:
+    paths: tuple[str, ...] = ()
+    titles: tuple[str, ...] = ()
+
+
+LOGGED_OUT: dict[str, LoggedOutMarkers] = {
+    "x": LoggedOutMarkers(("/login", "/i/flow/login", "/i/flow/signup"),
+                          ("log in to x", "sign up for x")),
+    "instagram": LoggedOutMarkers(("/accounts/login", "/accounts/emailsignup"),
+                                  ("login • instagram",)),
+    "facebook": LoggedOutMarkers(("/login", "/login.php"),
+                                 ("log in to facebook", "facebook - log in or sign up",
+                                  "facebook – log in or sign up")),
+    "linkedin": LoggedOutMarkers(("/login", "/authwall", "/uas/login", "/checkpoint/lg"),
+                                 ("linkedin login", "linkedin: log in or sign up")),
+    "reddit": LoggedOutMarkers(("/login", "/account/login", "/register"),
+                               ("log in to reddit",)),
+}
+
+# The page `doctor` opens to check that the browser profile is logged in.
+HOME_URL: dict[str, str] = {
+    "x": "https://x.com/home",
+    "reddit": "https://www.reddit.com/",
+    "instagram": "https://www.instagram.com/",
+    "facebook": "https://www.facebook.com/",
+    "linkedin": "https://www.linkedin.com/feed/",
+}
+
+
+def logged_out_markers(site: str) -> LoggedOutMarkers:
+    return LOGGED_OUT.get(site, LoggedOutMarkers())
+
+
 def get_site(name: str) -> Site:
     try:
         return SITES[name]

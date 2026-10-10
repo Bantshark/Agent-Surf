@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from agent_surf import actionmap, outbox, runner, sitemap, sites
+from agent_surf import actionmap, challenge, outbox, runner, sitemap, sites
 from agent_surf.executor import (ActionPage, Refused, StepFailed, SubmitUnknown, Submitter,
                                  normalize_text)
 from agent_surf.store import Store
@@ -27,6 +27,7 @@ from agent_surf.store import Store
 log = logging.getLogger("agent_surf.publisher")
 
 CONFIRM_TIMEOUT_S = 20.0
+MAX_LOGIN_WAITS = 2   # Fix 22: login waits per publish before the item goes back to approved
 READBACK_TIMEOUT_S = 15.0
 
 OpenPage = Callable[[sites.Site], ActionPage]
@@ -387,6 +388,35 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
     logrow = _Log(store, item, now)
     notes: list[str] = []
     healed = False
+    logins = 0
+
+    def logged_out(page: Any, e: challenge.LoggedOut) -> None:
+        """Fix 22: stopped before the submit click by a login wall. Wait for the
+        login (the guard notifies) and start over on a fresh tab, or put the
+        item back to approved and raise LoggedOutTimeout (exit 7). Never a
+        relearn, never needs_attention."""
+        nonlocal logins
+        assert_not_submitted()
+        waiter = getattr(guard, "wait_logged_in", None)
+        if waiter is not None and logins < MAX_LOGIN_WAITS and not isinstance(e, challenge.LoggedOutTimeout):
+            logins += 1
+            try:
+                waiter(page.read)
+                log.info("logged in; starting queue item %s over (nothing was submitted)", item_id)
+                return
+            except challenge.LoggedOut as timeout:
+                e = timeout
+        error = f"logged out, not attempted (nothing submitted): {e}"
+        outbox.release(store, item_id, error)
+        logrow.completed(f"logged_out: {str(e)[:200]}")
+        log.warning("queue item %s stays approved: %s", item_id, error)
+        raise e if isinstance(e, challenge.LoggedOutTimeout) else challenge.LoggedOutTimeout(
+            e.site, e.reason, str(e)) from None
+
+    def assert_not_submitted() -> None:
+        if _submitted_at(store, item_id, logrow) is not None:   # never: the guard runs before the click
+            raise RuntimeError(f"queue item {item_id}: logged out after submit; outcome unknown")
+
     while True:
         page = open_page(site)
         sub = Submitter(page, amap, payload, guard)
@@ -397,6 +427,9 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
             logrow.submitted(submit_moment())
             notes += sub.notes
             break
+        except challenge.LoggedOut as e:
+            logged_out(page, e)
+            continue
         except (Refused, sites.DomainRefused) as e:
             _discard_quietly(sub)
             return _finish(store, item_id, "needs_attention", logrow, error=f"refused: {e}", notes=sub.notes)
@@ -404,6 +437,10 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
             logrow.submitted(submit_moment())
             return resolve_unknown(store, open_page, item, amap, logrow, str(e))
         except StepFailed as e:
+            reason = challenge.logged_out_page(page.read)
+            if reason:   # e.g. the session expired mid-steps: a login wall, not a broken map
+                logged_out(page, challenge.LoggedOut(item["site"], reason))
+                continue
             _discard_quietly(sub)
             if healed or client is None:
                 return _finish(store, item_id, "needs_attention", logrow,
@@ -419,6 +456,9 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
                     thread_url=payload.get("thread_url"), old_map=amap, broken_reason=str(e), guard=guard,
                     start_url=None if amap["start"]["url_template"] in actionmap.URL_PLACEHOLDERS
                     else amap["start"]["url_template"])
+            except challenge.LoggedOut as le:
+                logged_out(page, le)
+                continue
             except Exception as le:
                 return _finish(store, item_id, "needs_attention", logrow,
                                error=f"step failed before submit ({e}); relearn failed: {le}")

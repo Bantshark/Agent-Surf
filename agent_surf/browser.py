@@ -210,6 +210,7 @@ class ReadOnlyPage:
         self._page = page
         self.site = site
         self.buffer = buffer if buffer is not None else ResponseBuffer()
+        self.last_url: str | None = None   # reopened after a login wall (challenge.wait_until_logged_in)
         page.on("response", self.buffer.on_response)
         page.on("websocket", self.buffer.on_websocket)
 
@@ -217,6 +218,7 @@ class ReadOnlyPage:
 
     def goto(self, url: str) -> None:
         sites.check_url(self.site, url)
+        self.last_url = url
         self._page.goto(url, wait_until="domcontentloaded")
         self.check_domain()
 

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from agent_surf import outbox
+from agent_surf import challenge, outbox
 from agent_surf.publisher import PublishRefused
 from agent_surf.store import Store
 
@@ -116,6 +116,9 @@ def tick(store: Store, publish_fn: Callable[[int], object], *, now: datetime,
             result = publish_fn(item["id"])
         except PublishRefused as e:
             report.not_published.append((item["id"], str(e)))
+            continue
+        except challenge.LoggedOut as e:   # Fix 22: the item stays approved; retried next tick
+            report.not_published.append((item["id"], f"logged out: {e}"))
             continue
         except Exception as e:  # one bad item must not stop the dispatcher
             log.exception("publishing queue item %s failed", item["id"])

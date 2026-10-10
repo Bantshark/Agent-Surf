@@ -2,7 +2,8 @@
 
 Results go to stdout (JSON with --json, on every command); logs go to stderr.
 Exit codes: 0 ok, 1 error, 2 usage, 3 CAPTCHA not cleared, 4 map broken and no
-API key, 5 publish refused (not attempted), 6 publish needs attention.
+API key, 5 publish refused (not attempted), 6 publish needs attention, 7 logged
+out (no login within 10 minutes; nothing relearned, nothing sent to the model).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ EXIT_CHALLENGE = 3
 EXIT_MAP_BROKEN = 4
 EXIT_PUBLISH_REFUSED = 5    # not attempted: not approved, content changed, no action map, caps
 EXIT_NEEDS_ATTENTION = 6    # attempted, not confirmed published: see `queue show <id>`
+EXIT_LOGGED_OUT = 7         # login wall not cleared in time; a queue item stays approved
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -597,6 +599,9 @@ def main(argv: list[str] | None = None) -> int:
     except challenge.ChallengeTimeout as e:
         log.error("%s", e)
         return EXIT_CHALLENGE
+    except challenge.LoggedOut as e:
+        log.error("%s", e)
+        return EXIT_LOGGED_OUT
     except Exception as e:
         from agent_surf import learner, runner, youtube
 

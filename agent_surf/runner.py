@@ -4,7 +4,9 @@ The runner navigates to the templated URL, extracts items (network buffer
 first, DOM as fallback), emits only ids not seen before, and stops on
 ``stop_after_seen`` consecutive already-seen items, ``max_scrolls`` or
 ``max_items``. If the first pass finds nothing usable it raises ``MapBroken``;
-deciding whether to relearn is the caller's job.
+deciding whether to relearn is the caller's job. A login wall is never a
+broken map: it raises challenge.LoggedOut instead (the guard waits for a login
+first).
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from agent_surf import sitemap, sites
+from agent_surf import challenge, sitemap, sites
 from agent_surf.browser import ReadOnlyPage
 from agent_surf.store import Store
 
@@ -193,6 +195,7 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
     guard(page)
     wait_for_content(m, page, start_seq, guard)
 
+    challenge.ensure_logged_in(page)   # before the first pass: a login wall is not a broken map
     click_selectors = list(m.get("click") or [])
 
     def expand() -> int:
@@ -255,6 +258,7 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
                     break
                 broken = f"every item misses a required field ({', '.join(required)})"
             if broken:
+                challenge.ensure_logged_in(page)
                 raise MapBroken(broken, m)
             result.source = chosen
             row = store.map_row(site, page_type, m["version"]) if "version" in m else None

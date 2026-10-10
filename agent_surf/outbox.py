@@ -282,6 +282,19 @@ def transition(store: Store, item_id: int, new_status: str, *, last_error: str |
     return get(store, item_id)
 
 
+def release(store: Store, item_id: int, last_error: str) -> dict:
+    """Fix 22: publishing -> approved, keeping the approval (content hash,
+    snapshots). Only for an attempt that stopped before the submit click
+    (logged out), so the next dispatch can try again; not a TRANSITIONS edge."""
+    with store.conn:
+        cur = store.conn.execute(
+            "UPDATE queue SET status = 'approved', updated_at = ?, last_error = ? "
+            "WHERE id = ? AND status = 'publishing'", (now_iso(), last_error, item_id))
+    if cur.rowcount != 1:
+        raise IllegalTransition(f"queue item {item_id} is not publishing")
+    return get(store, item_id)
+
+
 def approve(store: Store, item_id: int) -> dict:
     item = get(store, item_id)
     if item["status"] not in APPROVABLE:

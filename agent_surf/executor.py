@@ -24,7 +24,7 @@ import time
 import unicodedata
 from typing import Any, Callable
 
-from agent_surf import actionmap, sitemap, sites
+from agent_surf import actionmap, challenge, sitemap, sites
 from agent_surf.actionmap import PRESS_KEYS, SUBMIT_LABELS, Resolved, candidates, try_resolve
 from agent_surf.browser import ReadOnlyPage
 
@@ -150,6 +150,9 @@ class StepRunner:
     # -- helpers ------------------------------------------------------------
 
     def _guard(self) -> None:
+        # Fix 22: a login wall stops the run here (challenge.LoggedOut); the
+        # publisher waits for the login and starts over on a fresh tab.
+        challenge.ensure_logged_in(self.page.read)
         self.guard(self.page.read)
 
     def _check_domain(self) -> None:
