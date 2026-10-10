@@ -1,8 +1,10 @@
 """Fix 12: media types by extension AND magic bytes, size caps, no symlinks,
 at most 4 per item; checked at add, approve and publish."""
 
+import inspect
 import json
 import os
+import stat
 
 import pytest
 
@@ -63,12 +65,52 @@ def test_default_caps():
     assert (outbox.IMAGE_MAX_BYTES, outbox.VIDEO_MAX_BYTES, outbox.MAX_MEDIA) == (15 << 20, 512 << 20, 4)
 
 
+def _symlink_or_skip(real, link):
+    """Creating a symlink needs admin or Developer Mode on Windows (WinError 1314)."""
+    try:
+        os.symlink(real, link)
+    except (NotImplementedError, PermissionError):
+        pytest.skip("symlinks need admin or Developer Mode on Windows")
+    except OSError as e:
+        if getattr(e, "winerror", None) == 1314:
+            pytest.skip("symlinks need admin or Developer Mode on Windows")
+        raise
+
+
 def test_symlink_rejected(store, tmp_path):
     real = make(tmp_path, "real.png", MAGIC[".png"])
     link = tmp_path / "link.png"
-    os.symlink(real, link)
+    _symlink_or_skip(real, link)
     with pytest.raises(QueueError, match="symlink"):
         outbox.add(store, "x", "post", {"media": [str(link)]})
+
+
+def test_symlink_rejected_via_lstat(store, tmp_path, monkeypatch):
+    """Runs everywhere: outbox's os.lstat reports a symlink, the media is refused."""
+    path = make(tmp_path, "looks-like-link.png", MAGIC[".png"])
+    real_lstat = os.lstat
+    calls = []
+
+    def fake_lstat(p, *a, **kw):
+        st = real_lstat(p, *a, **kw)
+        if os.path.abspath(p) == os.path.abspath(path):
+            calls.append(p)
+            fields = list(st)
+            fields[0] = stat.S_IFLNK | 0o777
+            return os.stat_result(fields)
+        return st
+
+    monkeypatch.setattr(outbox.os, "lstat", fake_lstat)
+    with pytest.raises(QueueError, match="symlink"):
+        outbox.add(store, "x", "post", {"media": [path]})
+    assert calls, "outbox must check media with os.lstat"
+
+
+def test_media_check_uses_lstat_not_stat():
+    """os.stat follows links and would let a symlink pass as a regular file."""
+    src = inspect.getsource(outbox.check_media)
+    assert "os.lstat(" in src
+    assert "os.stat(" not in src
 
 
 def test_at_most_four(store, tmp_path):
