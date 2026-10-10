@@ -109,6 +109,9 @@ def build_parser() -> argparse.ArgumentParser:
     pub.add_argument("id", type=int)
     d = sub.add_parser("dispatch", help="publish due approved items every 30 s")
     d.add_argument("--once", action="store_true", help="one tick, then exit")
+    d.add_argument("--stderr-only", action="store_true",
+                   help="run without Telegram (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID); "
+                        "notifications then only go to stderr")
     ib = sub.add_parser("inbox", help="new notifications/messages (zero model calls)")
     ib.add_argument("site")
     ib.add_argument("page_type")
@@ -339,8 +342,10 @@ def _item_line(item: dict) -> str:
     return f"{item['id']}\t{item['status']}\t{item['site']} {item['action']}\t{when}\t{what}"
 
 
-def _publish_one(cfg: config.Config, store: Store, item_id: int) -> Any:
-    """Publish one item in its own browser session; its tabs close afterwards."""
+def _publish_one(cfg: config.Config, store: Store, item_id: int,
+                 notify: Any = None) -> Any:
+    """Publish one item in its own browser session; its tabs close afterwards.
+    Login and challenge waits are announced through ``notify``."""
     from agent_surf import publisher
     from agent_surf.executor import ActionPage
 
@@ -348,7 +353,7 @@ def _publish_one(cfg: config.Config, store: Store, item_id: int) -> Any:
         def open_page(site: sites.Site) -> ActionPage:
             return ActionPage(session.open_tab(), site)
         return publisher.publish(store, open_page, item_id, client=make_client(cfg), model=cfg.model,
-                                 maps_dir=cfg.maps_dir, guard=challenge.make_guard())
+                                 maps_dir=cfg.maps_dir, guard=challenge.make_guard(notify=notify))
 
 
 def cmd_learn_action(cfg: config.Config, args: argparse.Namespace) -> int:
@@ -438,6 +443,13 @@ def cmd_dispatch(cfg: config.Config, args: argparse.Namespace) -> int:
     from agent_surf import dispatcher, publisher
     from agent_surf.executor import ActionPage
 
+    # Fix 26: unattended publishing must be able to reach the human.
+    if config.telegram_credentials() is None and not args.stderr_only:
+        log.error("dispatch runs unattended, so items that need attention must reach you: set "
+                  "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, or pass --stderr-only to accept "
+                  "notifications on stderr only")
+        return EXIT_ERROR
+    notify = challenge.make_notifier({} if args.stderr_only else None)
     with Store(cfg.db_path) as store:
         def recover() -> None:
             if not outbox_has(store, "publishing"):
@@ -454,8 +466,8 @@ def cmd_dispatch(cfg: config.Config, args: argparse.Namespace) -> int:
                 log.info("tick %s: %s", report.at, data)
 
         try:
-            dispatcher.run(store, lambda i: _publish_one(cfg, store, i), recover_fn=recover,
-                           notify=challenge.make_notifier(), once=args.once, on_tick=on_tick)
+            dispatcher.run(store, lambda i: _publish_one(cfg, store, i, notify), recover_fn=recover,
+                           notify=notify, once=args.once, on_tick=on_tick)
         except KeyboardInterrupt:
             log.info("dispatcher stopped")
     return EXIT_OK

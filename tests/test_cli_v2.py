@@ -128,7 +128,7 @@ def test_dispatch_once_publishes_due_items(home, session, capsys):
     save_map(home)
     qid = json.loads(run(capsys, "queue", "add", "composetest", "post", "--text", "due now", "--json")[1])["id"]
     run(capsys, "queue", "approve", str(qid))
-    code, out, _ = run(capsys, "dispatch", "--once", "--json")
+    code, out, _ = run(capsys, "dispatch", "--once", "--json", "--stderr-only")
     assert code == 0 and json.loads(out.strip().splitlines()[-1])["published"] == [qid]
     assert session.create_calls == 1
 

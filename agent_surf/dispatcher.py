@@ -64,6 +64,22 @@ def set_last_tick(store: Store, at: datetime, started: datetime | None = None) -
     _set(store, "last_tick_finished", at)
 
 
+SNIPPET_CHARS = 60   # Fix 26: the most of a post's text a notification ever carries
+
+
+def alert_text(item: dict, status: str, reason: str) -> str:
+    """Queue id, site, action, status and reason; at most the first 60
+    characters of the post text, never all of it."""
+    text = " ".join(str((item.get("payload") or {}).get("text") or "").split())
+    snippet = text[:SNIPPET_CHARS] + ("…" if len(text) > SNIPPET_CHARS else "")
+    reason = " ".join(str(reason).split())
+    if len(text) > SNIPPET_CHARS and text in reason:
+        reason = reason.replace(text, snippet)
+    reason = reason[:200]
+    return (f"queue item {item['id']} ({item['site']} {item['action']}) {status}: {reason}"
+            + (f' ("{snippet}")' if snippet else ""))
+
+
 def _scheduled(item: dict) -> datetime | None:
     return datetime.fromisoformat(item["scheduled_at"]) if item["scheduled_at"] else None
 
@@ -112,23 +128,36 @@ def tick(store: Store, publish_fn: Callable[[int], object], *, now: datetime,
         when = _scheduled(item)
         if when is not None and when > now:
             continue
+        # Fix 26: every outcome that needs the human reaches them. A refusal that
+        # leaves the item approved (caps, spacing) is retried, not notified.
         try:
             result = publish_fn(item["id"])
         except PublishRefused as e:
             report.not_published.append((item["id"], str(e)))
+            after = outbox.get(store, item["id"])
+            if after["status"] in ("needs_attention", "failed"):
+                notify(alert_text(after, after["status"], after["last_error"] or str(e)))
             continue
         except challenge.LoggedOut as e:   # Fix 22: the item stays approved; retried next tick
             report.not_published.append((item["id"], f"logged out: {e}"))
+            notify(alert_text(item, "not published (logged out, stays approved)", str(e)))
+            continue
+        except challenge.ChallengeTimeout as e:
+            report.not_published.append((item["id"], f"challenge: {e}"))
+            notify(alert_text(item, "not published (challenge not cleared)", str(e)))
             continue
         except Exception as e:  # one bad item must not stop the dispatcher
             log.exception("publishing queue item %s failed", item["id"])
             report.not_published.append((item["id"], f"error: {type(e).__name__}"))
+            notify(alert_text(item, "error", f"{type(e).__name__}; see `agent-surf queue show {item['id']}`"))
             continue
         status = getattr(result, "status", "?")
         if status == "published":
             report.published.append(item["id"])
         else:
             report.not_published.append((item["id"], status))
+            after = getattr(result, "item", None) or outbox.get(store, item["id"])
+            notify(alert_text(after, status, after.get("last_error") or status))
     finished = (clock or (lambda: datetime.now(timezone.utc)))()
     set_last_tick(store, max(finished, now), started=now)
     return report
