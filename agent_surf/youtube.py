@@ -77,6 +77,14 @@ def classify_target(target: str) -> str:
     raise YouTubeError("target must be an https YouTube URL or ytsearchN:query")
 
 
+def check_opts(opts: dict) -> None:
+    """Fix 24: an explicit check (not ``assert``, which ``python -O`` removes):
+    no option that runs commands, writes link files or post-processes."""
+    bad = FORBIDDEN_OPTS & opts.keys()
+    if bad:
+        raise YouTubeError(f"refusing yt-dlp options: {', '.join(sorted(bad))}")
+
+
 def build_opts(*, subs: bool = False, comments: bool = False, flat: bool = False,
                outdir: Path | None = None) -> dict:
     opts: dict[str, Any] = {
@@ -100,7 +108,7 @@ def build_opts(*, subs: bool = False, comments: bool = False, flat: bool = False
         opts["getcomments"] = True
         extractor_args["max_comments"] = [str(MAX_COMMENTS)]
     opts["extractor_args"] = {"youtube": extractor_args}
-    assert not FORBIDDEN_OPTS & opts.keys()
+    check_opts(opts)
     return opts
 
 
@@ -161,6 +169,7 @@ def to_item(info: dict, page_type: str, *, subs: bool, comments: bool) -> dict:
 
 
 def _extract(target: str, opts: dict, ydl_factory: Callable[[dict], Any]) -> dict:
+    check_opts(opts)
     with ydl_factory(opts) as ydl:
         info = ydl.extract_info(target, download=bool(opts.get("writesubtitles")))
         return ydl.sanitize_info(info)
