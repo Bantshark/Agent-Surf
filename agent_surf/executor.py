@@ -152,6 +152,11 @@ class StepRunner:
     def _guard(self) -> None:
         self.guard(self.page.read)
 
+    def _check_domain(self) -> None:
+        """Fix 11: the tab must still be on the site (a click on a link could
+        have taken it elsewhere). Raises sites.DomainRefused."""
+        sites.check_url(self.page.site, self.raw.url)
+
     # -- composer container and pinned targets ------------------------------
 
     def _composer_target(self) -> dict | None:
@@ -282,6 +287,7 @@ class StepRunner:
                     if r is not None:
                         self._check_click_allowed(r.locator, f"dismiss[{i}]", actionmap.DISCARD_CLICK_LABELS)
                         r.locator.click(timeout=CLICK_TIMEOUT_MS)
+                self._check_domain()
         else:
             self.raw.keyboard.press("Escape")
 
@@ -439,6 +445,7 @@ class StepRunner:
             self._press(step, where)
         elif op == "wait_for":
             self._wait_for(step, where)
+        self._check_domain()
         self._guard()
 
     # -- public -------------------------------------------------------------
@@ -489,6 +496,7 @@ class Submitter(StepRunner):
         """Click the allowlisted submit target. Returns the response-buffer
         sequence number from just before the click (for receipts)."""
         self._guard()
+        self._check_domain()
         r, label = self._checked_submit()
         self.aria_before_submit = self.page.read.aria_snapshot()  # evidence: see page_changes()
         seq = self.page.buffer.last_seq
@@ -501,7 +509,13 @@ class Submitter(StepRunner):
         except Exception as e:  # the click may or may not have landed
             raise SubmitUnknown(f"submit click raised {type(e).__name__}") from None
         self.notes.append(f"submit: clicked {label!r}")
+        self.check_still_on_site()
         return seq
+
+    def check_still_on_site(self) -> None:
+        """After submit: off-site means the outcome is unknown (never resubmit)."""
+        if not sites.is_allowed_url(self.page.site, self.raw.url):
+            raise SubmitUnknown(f"the tab left the site after submit ({self.raw.url[:200]})")
 
 
     def page_changes(self, limit: int = 5) -> str:

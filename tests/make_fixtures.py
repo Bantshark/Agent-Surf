@@ -392,6 +392,11 @@ function inlineComposer() {
 }
 if (cfg.inline === 'now') inlineComposer();
 if (cfg.inline === 'late') setTimeout(inlineComposer, 500);
+if (cfg.modal && cfg.evil_submit) {
+  // Fix 11: a submit that takes the tab off-site (registered first: it wins).
+  $('submit').addEventListener('click', (e) => {
+    e.stopImmediatePropagation(); location.href = 'https://evil.test/after-submit'; });
+}
 if (cfg.modal) {
   $('editor').addEventListener('input', () => { state = $('editor').innerText.replace(/\n$/, ''); update(); });
   $('add-photo').addEventListener('click', () => { window.__addPhoto = (window.__addPhoto || 0) + 1; $('file').click(); });
@@ -444,9 +449,16 @@ COMPOSER_EXTRAS = ('<button type="button" id="audience" onclick="window.__audien
                    '<button type="button" id="icon-btn" onclick="window.__icon = 1"></button>')
 
 
-def modal_page(modal=True, inline="none", home="/home-inline", extras=False):
-    cfg = json.dumps({"modal": modal, "inline": inline, "home": home})
+# Fix 11: an "Add photo" control that is really a link off-site.
+EVIL_LINK = '<a id="evil" href="https://evil.test/upload">Add photo</a>'
+
+
+def modal_page(modal=True, inline="none", home="/home-inline", extras=False, evil_link=False,
+               evil_submit=False):
+    cfg = json.dumps({"modal": modal, "inline": inline, "home": home, "evil_submit": evil_submit})
     modal_html = MODAL_HTML.replace('<div id="thumbs">', COMPOSER_EXTRAS + '<div id="thumbs">') if extras else MODAL_HTML
+    if evil_link:
+        modal_html = modal_html.replace('<div id="thumbs">', EVIL_LINK + '<div id="thumbs">')
     return ('<!doctype html><html><head><meta charset="utf-8"><title>Compose Test</title></head><body>'
             '<main><h1>Home</h1>' + (TIMELINE_TWIN if extras else '') +
             '<div id="inline-slot"></div><p id="status" role="status"></p></main>'
@@ -465,6 +477,8 @@ COMPOSE_PAGES = {
     "/compose-modal": modal_page(inline="now"),
     "/compose-modal-only": modal_page(),
     "/compose-scoped": modal_page(extras=True),
+    "/compose-evil-link": modal_page(evil_link=True),
+    "/compose-evil-submit": modal_page(evil_submit=True),
     "/compose-modal-race": modal_page(home="/home-inline-late"),
     "/home-inline": modal_page(modal=False, inline="now"),
     "/home-inline-late": modal_page(modal=False, inline="late"),

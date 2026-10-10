@@ -80,11 +80,14 @@ def caps_problem(store: Store, site: str, action: str, limits: dict, now: dateti
 # Receipts
 
 def _await_network_confirm(page: ActionPage, net: dict, since_seq: int) -> tuple[str | None, str | None]:
-    """(post_id, error) from the create response; (None, None) if none arrived."""
+    """(post_id, error) from the create response; (None, None) if none arrived.
+    Raises SubmitUnknown if the tab leaves the site while waiting."""
     rx = re.compile(net["url_regex"])
     method = net.get("method", "POST")
     deadline = time.monotonic() + CONFIRM_TIMEOUT_S
     while True:
+        if not sites.is_allowed_url(page.site, page.raw.url):
+            raise SubmitUnknown(f"the tab left the site after submit ({page.raw.url[:200]})")
         for r in page.buffer.since(since_seq):
             if r.method == method and rx.search(r.url):
                 errors = sitemap.get_one(r.data, net.get("error_path", "errors"))
@@ -106,6 +109,8 @@ def _id_from_permalink(template: str, url: str) -> str | None:
 
 
 def _await_dom_confirm(page: ActionPage, amap: dict) -> tuple[str | None, str | None]:
+    if not sites.is_allowed_url(page.site, page.raw.url):
+        raise SubmitUnknown(f"the tab left the site after submit ({page.raw.url[:200]})")
     dom = amap["confirm"]["dom"]
     r = actionmap.resolve_target(page.raw, dom["target"], timeout_s=CONFIRM_TIMEOUT_S)
     if r is None:
@@ -286,6 +291,8 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
         else:
             post_id, error = _await_dom_confirm(page, amap)
             via = "dom"
+    except SubmitUnknown as e:
+        return resolve_unknown(store, open_page, item, amap, logrow, str(e))
     except Exception as e:
         return resolve_unknown(store, open_page, item, amap, logrow, f"confirm failed ({type(e).__name__})")
     if error:
