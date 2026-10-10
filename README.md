@@ -82,6 +82,9 @@ python -m agent_surf publish <id>
 python -m agent_surf dispatch [--once]
 python -m agent_surf inbox <site> <page_type> [--json]
 python -m agent_surf receipts [--json]
+python -m agent_surf account set <site> --handle H | account show
+python -m agent_surf actions set-lookup <site> <action> --page-type P [--handle H | --query Q]
+python -m agent_surf purge [--items-older-than DAYS] [--debug-older-than DAYS] [--dry-run]
 ```
 
 Workflow:
@@ -111,6 +114,18 @@ Workflow:
    permalink shows your text. Otherwise it is `needs_attention` with the
    evidence; nothing is ever retried blindly. `receipts` lists them.
 
+**Media** (images jpg/jpeg/png/gif/webp up to 15 MB, video mp4/mov/webm up to
+512 MB, at most 4, no symlinks; the file's content must match its extension).
+Approval copies the files into `$AGENT_SURF_HOME/media/<id>/`; publishing uploads
+those copies, so editing the originals afterwards changes nothing. `queue show`
+lists each file's type, size and hash prefix.
+
+**Clicks** in an action map are limited to composer controls (e.g. "Post text",
+"Add photos or video", "Reply", "Write a comment") inside the composer, plus
+"Close", "Cancel", "Discard", "Don't save", "Not now", "Dismiss", "Got it", "OK"
+for discarding; anything else (audience, scheduling, "More options", links on
+the page behind) is refused. The tab must stay on the site after every step.
+
 Queue states: `draft`, `approved`, `publishing`, `published`, `failed`,
 `needs_attention`, `rejected`. Only `approved` items are published.
 
@@ -124,9 +139,22 @@ an item was due, its `--missed` policy applies when dispatch resumes: `skip`
 a Telegram ping).
 
 **If the outcome is unknown** (crash or timeout after submit), Agent Surf looks
-for the post on your account through the reading side (the action map's
-`lookup` page, which needs a reading map) and records the receipt if found.
-It never submits the same item twice on its own.
+for the post on your account through the reading side and records the receipt
+if found. It never submits the same item twice on its own. Set it up once:
+
+```
+python -m agent_surf account set x --handle <your handle>
+python -m agent_surf learn x profile --handle <your handle>
+python -m agent_surf actions set-lookup x post --page-type profile --handle <your handle>   # or relearn
+```
+
+`learn-action` adds the lookup automatically once the account is set, and warns
+when a map has no working lookup. A post found this way must not already have a
+receipt and, when the page shows times, must be no older than the submit.
+
+**Receipts** record `read_back`: `true` (the post's own element shows your
+text), `"page"` (no post element found; the page shows the text) or `false`
+(needs attention).
 
 ### Data on this machine
 

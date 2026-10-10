@@ -411,6 +411,67 @@ issues were fixed on branch `claude/validate-fixes`:
    none without a map, success only with --keep-debug, refused inside the repo,
    CLI prints the path, every file passes the scrub guard's text checks.
 
+10. **Action-map clicks could reach unwanted controls** (security check;
+    branch `claude/v2-hardening`). Cause: click steps fell back page-wide after
+    the composer, guarded only by the DESTRUCTIVE denylist. Change: with a
+    `composer`, click steps resolve only inside it (page-wide only for discard
+    and dismiss); `actionmap.CLICK_LABELS` (per action) and
+    `DISCARD_CLICK_LABELS` are checked against the accessible name before every
+    click (case-insensitive, whitespace collapsed; empty names refused; order:
+    DESTRUCTIVE, "could publish", allowlist); `validate_action_map` rejects named
+    click/attach targets outside the allowlist (unnamed ones are only checked at
+    run time); refusals are never retried or self-healed; the learner prompt
+    lists the labels. Tests: `test_click_scope.py`.
+11. **No domain lock between action steps** (security check). Change: the tab URL
+    is checked against the site after every op (steps, discard, dismiss) and
+    right before submit (DomainRefused -> needs_attention + quiet discard); after
+    the submit click and while awaiting confirmation, off-site is an unknown
+    outcome (never resubmitted). Tests: `test_domain_lock_v2.py`.
+12. **Any regular file accepted as media** (security check). Change: jpg/jpeg,
+    png, gif, webp (<= 15 MB) and mp4, mov, webm (<= 512 MB); extension AND magic
+    bytes must agree; at most 4; symlinks refused (lstat, no resolve()); checked
+    at add, approve and publish; `queue show` lists path, type, size, sha256
+    prefix. No path denylist. Tests: `test_media_validation.py`.
+13. **Media swappable between check and upload** (security check, TOCTOU).
+    Change: approve copies media to `<AGENT_SURF_HOME>/media/<id>/<n><ext>`
+    (0700/0600 on POSIX), stores the snapshot paths (`queue.media_snapshot_json`,
+    additive), hashes the snapshot bytes; publish uploads only snapshots and
+    re-hashes them; re-approval re-snapshots; snapshots are deleted on publish or
+    reject. Items approved earlier keep their original paths. Tests:
+    `test_media_snapshot.py`.
+14. **Unbounded local data; any CDP host accepted** (security check). Change:
+    `purge [--items-older-than 90] [--debug-older-than 14] [--dry-run]` (items
+    and debug folders only; never maps, queue, receipts, seen ids); learn,
+    learn-action and inbox keep the newest 20 debug folders; CDP endpoints must
+    be loopback in both attach modes unless `AGENT_SURF_ALLOW_REMOTE_CDP=1`.
+    Known gap: encryption at rest (needs a dependency). Tests: `test_retention.py`.
+15. **Slow tick mistaken for sleep** (code review). Cause: last_tick was the
+    tick's start while publishes ran inline. Change: `last_tick_started` and
+    `last_tick_finished`; detection uses finish -> next start; the run loop also
+    compares wall clock with time.monotonic() across its sleep (POSIX suspend);
+    items due during a long tick publish normally. Tests: `test_dispatcher.py`.
+16. **Unknown outcome on X never checked the account** (code review). Change:
+    `account set <site> --handle H` / `account show` (table `accounts`);
+    learn-action fills `lookup {page_type: profile, handle}` for post/reply/
+    comment when a handle is set (DMs: none) and warns without a working lookup;
+    `actions set-lookup` writes a new validated map version; lookups must
+    supply exactly the placeholders of their page type; publish/recover say
+    explicitly when the lookup or its reading map is missing. Tests:
+    `test_lookup_account.py`.
+17. **Lookup could attach an older post with the same text** (code review).
+    Change: a candidate is accepted only if (a) its id is not in any receipt and
+    (b) when the reading map has a created_at/timestamp/time/date field, it
+    parses and is >= submitted_at - 120 s; newest wins; the receipt records
+    `match`. Tests: `test_lookup_match.py`.
+18. **Read-back matched text anywhere on the page** (code review). Change: read
+    back from the closest article/[role=article] (or map `readback.target`)
+    containing a link with the post id; fallback to the page body records
+    `read_back: "page"`; receipts carry true | "page" | false; published needs
+    true or "page". Tests: `test_readback.py`.
+19. **Caps counted from the publish start** (code review). Change: submitted_at
+    is the real submit moment (also on SubmitUnknown); caps read only the last
+    24 h through an index. Tests: `test_submit_time.py`.
+
 ## Agent Surf v2: the write layer
 Built on branch `claude/agent-surf-v2` (base `claude/cold-start-fix`, so the
 cold-start wait of Fix 5/6 is already in). v1 learns a page once and replays it
@@ -464,6 +525,14 @@ be in `start.requires` only when required, and then an attach step is
 mandatory. Rehearsal: text-only pass (must reach an enabled submit), then a
 media pass if there is an attach step; media-required: media pass only.
 
+After the security check (Fixes 10-18): clicks are label-allowlisted in code
+(`CLICK_LABELS` per action for steps; `DISCARD_CLICK_LABELS` for discard and
+dismiss) and, with a `composer`, step clicks resolve only inside it; a named
+click/attach target outside its allowlist fails validation. `lookup` must give
+exactly the placeholders its page type needs (e.g. `{page_type: profile,
+handle}`) and is filled automatically from `account set`. Optional
+`readback {target}` names the post element on the permalink page.
+
 ### Executor (`executor.py`)
 Text entry: fill() -> clear + keyboard.type() -> insertText(); accepted only
 when the composer shows exactly the payload text and submit is enabled. Media:
@@ -491,6 +560,11 @@ media file's bytes; media must be existing regular files at approval and at
 publish. `scheduled_at` is stored in UTC (input without offset = local time);
 `missed_policy` skip|run|ask (default ask).
 
+Media (Fixes 12-13): jpg/jpeg/png/gif/webp <= 15 MB, mp4/mov/webm <= 512 MB,
+extension and magic bytes must agree, at most 4, no symlinks; approval
+snapshots them into `<AGENT_SURF_HOME>/media/<id>/` and only the snapshots are
+hashed and uploaded.
+
 ### Publish and receipts (`publisher.py`)
 Only approved items whose hash matches; caps from `dispatch_log` (every submit
 counts). Receipt = the create response's id at id_path with nothing at
@@ -504,6 +578,11 @@ after submit). Unknown outcome (submit click error, no confirmation, crash ->
 never resubmitted. Self-heal: a step failing before submit discards the draft,
 relearns once in rehearsal mode and retries once; a second failure ->
 needs_attention.
+
+Receipts (Fixes 16-19): `read_back` is true (the post's own element), "page"
+(no post element; page text) or false (needs_attention); account-lookup
+receipts carry `via: "account lookup"` and the `match` rule; submitted_at is
+the real submit moment and caps read the last 24 h.
 
 ### Scheduler (`dispatcher.py`, `dispatch [--once]`)
 Ticks every 30 s; publishes due approved items (scheduled_at <= now or none)
@@ -533,3 +612,9 @@ site's composer (no action map has been learned against a live site); the
 default composer URLs in `sites.ACTION_START`; live WebSocket inboxes; real
 GraphQL create responses and permalinks; account lookup through real
 profile pages. All of this needs local live validation.
+
+### Known gaps after hardening
+- Encryption at rest: `$AGENT_SURF_HOME` (queue text, receipts, debug folders,
+  media snapshots) is stored unencrypted; encrypting it needs a dependency.
+- Accessible names for the click allowlist come from aria-label, innerText or
+  value; names from aria-labelledby are not resolved.
