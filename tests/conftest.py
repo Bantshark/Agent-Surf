@@ -62,6 +62,13 @@ COMPOSE_SITE = sites.Site("composetest", ("compose.test",), {
 
 
 @pytest.fixture(autouse=True)
+def no_credential_manager(monkeypatch):
+    """Tests never read a real Windows Credential Manager entry (Fix 27);
+    test_credentials.py turns this off with a fake advapi32."""
+    monkeypatch.setenv("AGENT_SURF_NO_CREDMAN", "1")
+
+
+@pytest.fixture(autouse=True)
 def feed_site():
     sites.register_site(FEED_SITE)
     sites.register_site(COMPOSE_SITE)

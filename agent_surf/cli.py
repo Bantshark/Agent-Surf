@@ -146,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
     slg.add_argument("--handle")
     slg.add_argument("--query")
 
+    key = sub.add_parser("key", help="store the Anthropic API key in the Windows Credential Manager")
+    ksub = key.add_subparsers(dest="key_command", required=True)
+    ksub.add_parser("set", parents=[common], help="prompt for the key (hidden) and store it")
+    ksub.add_parser("clear", parents=[common], help="remove the stored key")
+
     pg = sub.add_parser("purge", help="delete old stored items and debug folders (maps, queue, "
                                       "receipts and seen ids are kept)")
     pg.add_argument("--items-older-than", type=int, default=90, metavar="DAYS")
@@ -226,11 +231,12 @@ class _RunScope:
 
 
 def make_client(cfg: config.Config) -> Any:
-    if not config.anthropic_api_key():
+    key, _source = config.anthropic_key_and_source()
+    if not key:
         return None
     import anthropic
 
-    return anthropic.Anthropic()  # reads ANTHROPIC_API_KEY itself; never logged here
+    return anthropic.Anthropic(api_key=key)  # the key is never logged
 
 
 def emit(args: argparse.Namespace, data: Any, text: str | None = None) -> None:
@@ -258,7 +264,8 @@ def cmd_learn(cfg: config.Config, args: argparse.Namespace) -> int:
     sites.build_url(args.site, args.page_type, query=args.query, handle=args.handle)
     client = make_client(cfg)
     if client is None:
-        log.error("learn needs ANTHROPIC_API_KEY in the environment")
+        log.error("learn needs an Anthropic API key: set ANTHROPIC_API_KEY, or on Windows run "
+                  "agent-surf key set")
         return EXIT_ERROR
     with Store(cfg.db_path) as store, BrowserSession(cdp_endpoint(cfg)) as session:
         m = learner.learn(store, session.new_page(site), args.site, args.page_type, client=client,
@@ -364,7 +371,8 @@ def cmd_learn_action(cfg: config.Config, args: argparse.Namespace) -> int:
     site = sites.get_site(args.site)
     client = make_client(cfg)
     if client is None:
-        log.error("learn-action needs ANTHROPIC_API_KEY in the environment")
+        log.error("learn-action needs an Anthropic API key: set ANTHROPIC_API_KEY, or on Windows "
+                  "run agent-surf key set")
         return EXIT_ERROR
     with Store(cfg.db_path) as store, BrowserSession(cdp_endpoint(cfg)) as session:
         try:
@@ -585,6 +593,33 @@ def cmd_actions(cfg: config.Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_key(cfg: config.Config, args: argparse.Namespace) -> int:
+    """Fix 27. The value is read with getpass and never printed or logged."""
+    from agent_surf import credentials
+
+    if not credentials.is_windows():
+        log.error("the Windows Credential Manager is only available on Windows; here, set "
+                  "ANTHROPIC_API_KEY in the environment instead")
+        return EXIT_ERROR
+    if args.key_command == "set":
+        import getpass
+
+        value = getpass.getpass("Anthropic API key (input hidden): ").strip()
+        if not value:
+            log.error("no key entered; nothing stored")
+            return EXIT_ERROR
+        credentials.write_generic(credentials.ANTHROPIC_TARGET, value)
+        del value
+        log.info("stored in the Windows Credential Manager as %s (Generic, this machine)",
+                 credentials.ANTHROPIC_TARGET)
+        emit(args, {"stored": True, "target": credentials.ANTHROPIC_TARGET})
+    else:
+        removed = credentials.delete_generic(credentials.ANTHROPIC_TARGET)
+        log.info("%s %s", "removed" if removed else "there was no", credentials.ANTHROPIC_TARGET)
+        emit(args, {"removed": removed, "target": credentials.ANTHROPIC_TARGET})
+    return EXIT_OK
+
+
 def prune_debug(cfg: config.Config) -> None:
     from agent_surf import retention
 
@@ -595,7 +630,8 @@ def prune_debug(cfg: config.Config) -> None:
 COMMANDS = {"chrome": cmd_chrome, "learn": cmd_learn, "run": cmd_run, "maps": cmd_maps,
             "youtube": cmd_youtube, "scrub": cmd_scrub, "learn-action": cmd_learn_action,
             "queue": cmd_queue, "publish": cmd_publish, "dispatch": cmd_dispatch, "inbox": cmd_inbox,
-            "receipts": cmd_receipts, "items": cmd_items, "purge": cmd_purge, "account": cmd_account, "actions": cmd_actions}
+            "receipts": cmd_receipts, "items": cmd_items, "purge": cmd_purge, "account": cmd_account, "actions": cmd_actions,
+            "key": cmd_key}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -608,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
                         force=True)
     cfg = config.load()
     try:
-        if args.command not in ("chrome", "scrub"):
+        if args.command not in ("chrome", "scrub", "key"):
             cfg.ensure_dirs()
         return COMMANDS[args.command](cfg, args)
     except challenge.ChallengeTimeout as e:
@@ -618,11 +654,11 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%s", e)
         return EXIT_LOGGED_OUT
     except Exception as e:
-        from agent_surf import learner, runner, youtube
+        from agent_surf import credentials, learner, runner, youtube
 
         known = (BrowserError, sites.DomainRefused, sites.UnknownSite, sitemap.MapError,
                  runner.NoMap, learner.LearnError, learner.HealFailed, youtube.YouTubeError,
-                 ValueError, OSError)  # QueueError/IllegalTransition/ActionMapError are ValueErrors
+                 credentials.CredentialError, ValueError, OSError)  # QueueError/IllegalTransition/ActionMapError are ValueErrors
         if isinstance(e, known):
             log.error("%s", e)
             return EXIT_ERROR

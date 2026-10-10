@@ -2,7 +2,8 @@
 
 Secrets (ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN) are never stored on the Config
 object, so they cannot leak through a repr or a log line. Read them on demand
-with the accessor functions below.
+with the accessor functions below. On Windows the Anthropic key may instead
+live in the Credential Manager (credentials.py); the environment wins.
 """
 
 from __future__ import annotations
@@ -62,7 +63,19 @@ def load(env: Mapping[str, str] | None = None) -> Config:
 
 
 def anthropic_api_key(env: Mapping[str, str] | None = None) -> str | None:
-    return _env(env).get("ANTHROPIC_API_KEY") or None
+    return anthropic_key_and_source(env)[0]
+
+
+def anthropic_key_and_source(env: Mapping[str, str] | None = None) -> tuple[str | None, str | None]:
+    """(key, "env" | "credential manager") or (None, None). Precedence:
+    ANTHROPIC_API_KEY, then (Windows only) the Credential Manager."""
+    key = _env(env).get("ANTHROPIC_API_KEY")
+    if key:
+        return key, "env"
+    from agent_surf import credentials
+
+    key = credentials.anthropic_from_credman(_env(env))
+    return (key, "credential manager") if key else (None, None)
 
 
 def telegram_credentials(env: Mapping[str, str] | None = None) -> tuple[str, str] | None:
