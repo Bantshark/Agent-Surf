@@ -25,7 +25,10 @@ python -m agent_surf learn <site> <page_type> [--query Q | --handle H]
 python -m agent_surf run   <site> <page_type> [--query Q | --handle H] [--json]
 python -m agent_surf maps  list | show <site> <page_type>
 python -m agent_surf youtube <url-or-ytsearchN:query> [--subs] [--comments] [--json]
-python -m agent_surf scrub <in.har> <out.har>
+python -m agent_surf items [--site S] [--page-type P] [--run RUN_ID | --since ISO8601 | --undelivered] [--json] [--mark-delivered]
+python -m agent_surf scrub <in.har> <out.har> [--keep-bodies]
+python -m agent_surf doctor [--json]
+python -m agent_surf key set | key clear              # Windows: Anthropic key in the Credential Manager
 ```
 
 1. `chrome` prints a command that starts Chrome with a dedicated profile under
@@ -36,7 +39,32 @@ python -m agent_surf scrub <in.har> <out.har>
    reduced JSON responses to Claude, and saves the returned map only if it
    validates and extracts at least 3 items.
 3. `run` replays the map with no model calls and prints only items not seen
-   before. If the map breaks and `ANTHROPIC_API_KEY` is set, it relearns once.
+   before. If the map breaks and an Anthropic key is available, it relearns once.
+4. `doctor` checks everything a run needs, without model calls or publishing:
+   pinned packages, the browser (loopback CDP), that each site with a map is
+   logged in (one tab on its home page, closed again), that maps validate,
+   lookups, account handles, Telegram and the Anthropic key (presence and
+   source only), data size and queue counts. Exit 0 when nothing required
+   failed, else 1.
+
+**Never losing items.** `run`, `inbox` and `youtube` print `run_id=...` on
+stderr and stamp it on every item they store. An item counts as delivered only
+after stdout was written and flushed; if printing fails (a closed pipe, a full
+disk) the command exits 1, and `items --undelivered` (or `items --run <id>`)
+prints those items again, in the same shape `run` prints (`--json`: a plain
+array). `--mark-delivered` marks what it printed.
+
+**Logged out?** A login page is never treated as a broken map, relearned or
+sent to Claude. Agent Surf asks you to "log in to <site> in the Agent Surf
+browser window", checks every 5 s, reopens the page and carries on; after 10
+minutes it exits 7 (a queue item stays approved and is retried later).
+
+**Anthropic key.** `ANTHROPIC_API_KEY` from the environment wins. On Windows,
+`key set` stores the key in the Credential Manager (Generic credential
+`agent-surf/anthropic`, prompted without echo) and Agent Surf reads it from
+there when the variable is unset; `key clear` removes it. Elsewhere, use the
+environment variable. The key is never printed or logged; `doctor` says only
+"present via env", "present via credential manager" or "missing".
 
 Sites and page types:
 
@@ -57,7 +85,8 @@ Exit codes: `0` ok, `1` error, `2` usage, `3` CAPTCHA not cleared within 10
 minutes, `4` map broken and no API key to relearn, `5` publish refused (not
 attempted: not approved, content changed since approval, no action map, or a
 cap), `6` publish needs attention (attempted but not confirmed published; see
-`queue show <id>`).
+`queue show <id>`), `7` logged out (no login within 10 minutes; nothing was
+relearned or sent to Claude, and a queue item stays approved).
 
 Environment:
 
@@ -66,8 +95,8 @@ Environment:
 | `AGENT_SURF_CDP_URL` | `http://127.0.0.1:9222` | Your Chrome |
 | `AGENT_SURF_HOME` | `~/.agent-surf` | DB, learned maps, Chrome profile |
 | `AGENT_SURF_MODEL` | `claude-sonnet-5-5` | Learner model |
-| `ANTHROPIC_API_KEY` | | `learn` and self-heal only |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | | CAPTCHA and missed-schedule pings; otherwise stderr |
+| `ANTHROPIC_API_KEY` | | `learn` and self-heal only (Windows: or `key set`) |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | | CAPTCHA, login, missed-schedule and needs-attention pings; required by `dispatch` unless `--stderr-only` |
 | `AGENT_SURF_ATTACH` | `cdp` | `devtools-active-port` (experimental, see below) |
 | `AGENT_SURF_PROFILE_DIR` | | Chrome profile dir for `devtools-active-port` |
 | `AGENT_SURF_ALLOW_REMOTE_CDP` | | `1` allows a non-loopback CDP endpoint (off by default) |
@@ -79,7 +108,7 @@ python -m agent_surf learn-action <site> post|reply|dm|comment [--target URL | -
 python -m agent_surf queue add <site> <action> [--text T] [--media F ...] [--target URL] [--thread URL] [--at ISO8601] [--missed skip|run|ask]
 python -m agent_surf queue list [--status S] | show <id> | approve <id> | approve --all-drafts | reject <id>
 python -m agent_surf publish <id>
-python -m agent_surf dispatch [--once]
+python -m agent_surf dispatch [--once] [--stderr-only]
 python -m agent_surf inbox <site> <page_type> [--json]
 python -m agent_surf receipts [--json]
 python -m agent_surf account set <site> --handle H | account show
@@ -108,7 +137,12 @@ Workflow:
    changes afterwards, publishing refuses and the item needs re-approval.
 4. **Publish:** `publish <id>` now, or leave `dispatch` running to publish
    approved items when they are due. Without `--at`, an approved item is due
-   immediately.
+   immediately. `dispatch` runs unattended, so it refuses to start without
+   Telegram (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) unless you pass
+   `--stderr-only`. It notifies every item that ends up needs-attention or
+   failed, login and CAPTCHA waits, and errors (queue id, site, action, reason
+   and at most the first 60 characters of the text); a cap is not notified (the
+   item simply goes out later).
 5. **Receipts:** an item becomes `published` only when the platform's own
    create response returns a post id with no errors **and** the post's
    permalink shows your text. Otherwise it is `needs_attention` with the
@@ -168,6 +202,12 @@ your browser profile.
 | `maps/` | learned reading and action maps (selectors, no content) | relearn / delete |
 | `media/<id>/` | approved media snapshots (0700/0600 on POSIX) | removed when the item is published or rejected |
 | `debug/` | learn-action evidence (map, error, notes, page snapshots that can include other people's posts) | newest 20 kept automatically; `purge` |
+
+Stored reading items carry the `run_id` that stored them and `delivered_at`
+(when they were printed); `items --undelivered` shows the ones never printed.
+`doctor` reports the folder's size and the debug, media and item counts. On
+Windows the Anthropic key can live in the Credential Manager instead of the
+environment (`key set`), never in a file.
 | `chrome-profile/` | the dedicated Chrome profile (cookies, logins) if you use `agent-surf chrome` | Chrome |
 
 ```
@@ -247,7 +287,23 @@ pytest -q
 ```
 
 `tests/make_fixtures.py` regenerates the fixtures. `tests/test_scrub_guard.py`
-fails if any fixture contains cookies, auth headers or token-shaped headers.
+fails if any fixture contains cookies, auth headers, token-shaped headers, or
+email- or phone-shaped strings.
+
+`tests/test_media_validation.py::test_symlink_rejected` creates a real symlink;
+on Windows without admin or Developer Mode it is skipped (an lstat-based test
+covers the same check everywhere).
+
+### Scrubbing HAR files
+
+`scrub <in.har> <out.har>` removes cookies, auth and token-shaped headers,
+redacts credential-named query/body parameters and, by default, **drops every
+response body** (each becomes `REDACTED (<n> bytes, <mime>)`) and WebSocket
+message data. `--keep-bodies` keeps JSON and text bodies but redacts keys that
+look like credentials or personal data (email, phone, password, birth date,
+address, dob, ssn); binary bodies are still dropped. A scrubbed HAR can still
+show page structure, URLs and other people's content: **do not commit one
+unless it is synthetic.**
 
 ## Ground rules
 

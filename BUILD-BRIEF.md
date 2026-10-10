@@ -472,6 +472,94 @@ issues were fixed on branch `claude/validate-fixes`:
     is the real submit moment (also on SubmitUnknown); caps read only the last
     24 h through an index. Tests: `test_submit_time.py`.
 
+20. **Symlink test false-failed on Windows** (local validation: WinError 1314
+    in `os.symlink`). Cause: creating a symlink needs admin or Developer Mode on
+    Windows. Change: the real-symlink test skips on WinError 1314,
+    PermissionError or NotImplementedError; a new test monkeypatches outbox's
+    `os.lstat` to report S_IFLNK and runs everywhere; another asserts
+    `check_media` uses lstat, not stat. Tests: `test_media_validation.py`.
+21. **Items marked seen before they were printed** (code review). Symptom: a
+    broken pipe or closed stdout after a run lost the new items for good (their
+    ids were already seen). Change: `items` gains `run_id` and `delivered_at`
+    (additive; older rows count as delivered); every run, inbox and youtube
+    invocation gets a run_id (UTC timestamp + random suffix, printed to stderr
+    as `run_id=...`); delivered_at is set only after stdout was written and
+    flushed (JSON and text); a failure exits 1 and says how to recover; the
+    seen + item insert is one transaction. New command `items [--site S]
+    [--page-type P] [--run ID | --since ISO8601 | --undelivered] [--json]
+    [--mark-delivered]` prints what `run` prints; `run --json` stays a plain
+    array. Tests: `test_items_delivery.py`.
+22. **A logged-out page looked like a broken map** (local validation risk).
+    Cause: a login wall has no items, so the runner raised MapBroken and the
+    self-heal sent the login page to the model. Change: per-site markers
+    (`sites.LOGGED_OUT`: URL paths and title prefixes, kept as data) and
+    `challenge.detect_logged_out`, separate from challenges (LinkedIn's
+    /checkpoint/lg is a login, not a CAPTCHA). The guard (`challenge.Guard`)
+    checks after navigation, before the first pass, inside wait_for_content and
+    in the executor; the runner, learner and action learner refuse a login wall
+    before MapBroken and before any model call. On detection: notify "log in to
+    <site> in the Agent Surf browser window", poll every 5 s for 10 min, reopen
+    the page that was being opened, continue; on timeout `LoggedOutTimeout`,
+    CLI exit 7. Never MapBroken, never a relearn or self-heal, never a model
+    call. The executor stops on a login wall; the publisher waits for the login
+    and starts over on a fresh tab (nothing was submitted: the guard runs
+    before the submit click), or puts the item back to approved with
+    last_error via `outbox.release` (publishing -> approved keeping the
+    approval; not a general transition). The dispatcher retries it next tick.
+    Tests: `test_logged_out.py` (synthetic login walls on feed.test and
+    compose.test).
+23. **HAR scrub kept response bodies** (code review). Change: by default every
+    response `content.text` becomes "REDACTED (<n> bytes, <mime>)" and
+    `content.encoding` is dropped; WebSocket message data too. `scrub
+    --keep-bodies` keeps JSON/text bodies and redacts keys matching the
+    credential pattern or `(?i)email|phone|password|birth|address|dob|ssn`
+    (request bodies use the same keys); HTML/text keeps its text with values
+    after such keys redacted; binary bodies are still dropped. Files are read
+    and written as UTF-8. The scrub guard also fails on email- or phone-shaped
+    strings in fixtures. A scrubbed HAR still shows page structure and URLs:
+    commit one only if it is synthetic. Tests: `test_har_scrub.py`,
+    `test_scrub_guard.py`.
+24. **Security check behind `assert`** (code review). Cause: `python -O`
+    strips asserts; `youtube.build_opts` guarded FORBIDDEN_OPTS with one.
+    Change: `youtube.check_opts` raises YouTubeError, called in build_opts and
+    again before yt-dlp is constructed; the package has no assert statements
+    (a test walks the AST). Tests: `test_no_asserts.py`.
+25. **Accessible names ignored aria-labelledby** (known gap). Change: one JS
+    resolver (`browser.ACCESSIBLE_NAME_FN`): aria-labelledby (referenced
+    elements' text, joined), aria-label, labels/alt/title, innerText, value
+    (then descendant img alt, textContent); a text field is named by its
+    labels, title or placeholder, never by what was typed. The click allowlists and the submit
+    allowlist use the resolved name; DESTRUCTIVE and the could-publish check
+    see every name source; the reading side's safe clicks use it too. Tests:
+    `test_accessible_name.py`.
+26. **Unattended dispatch could fail silently** (local validation). Change:
+    `dispatch` refuses to start without TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID
+    unless `--stderr-only`; it notifies every publish outcome other than
+    published (needs_attention, failed, a refusal that moved the item to
+    needs_attention, logged out, challenge, error) but not a cap/spacing
+    refusal (retried); login and challenge waits go through the same notifier.
+    Messages carry queue id, site, action, status and reason, and at most the
+    first 60 characters of the post text. Tests: `test_dispatch_notify.py`.
+27. **Anthropic key only from the environment** (Windows usability). Change:
+    on Windows, when ANTHROPIC_API_KEY is unset, a Generic credential
+    `agent-surf/anthropic` is read from the Credential Manager (stdlib ctypes:
+    advapi32 CredReadW/CredFree; blob UTF-16-LE or UTF-8, trailing NUL
+    stripped); `key set` (getpass, CredWriteW, Generic,
+    CRED_PERSIST_LOCAL_MACHINE) and `key clear`. Environment wins. Elsewhere:
+    environment only, with a clear message. The value is never printed,
+    logged or put in an exception; the client gets it as `api_key`. Tests use
+    a fake advapi32 and set AGENT_SURF_NO_CREDMAN=1 everywhere else. Tests:
+    `test_credentials.py`.
+28. **No single health check** (local validation). Change: `agent-surf doctor
+    [--json]`: pinned package versions; CDP endpoint loopback and reachable
+    (`/json/version`, host and port only); for each site with a map, one tab
+    on its home page (`sites.HOME_URL`) for the Fix 22 login check, closed
+    again; reading and action maps valid; lookups working; account handles;
+    Telegram and Anthropic key presence (and the key's source); home size,
+    debug/media/items counts; queue counts by status. No model calls, no
+    publishing. Exit 0 when nothing required failed, else 1. Tests:
+    `test_doctor.py`.
+
 ## Agent Surf v2: the write layer
 Built on branch `claude/agent-surf-v2` (base `claude/cold-start-fix`, so the
 cold-start wait of Fix 5/6 is already in). v1 learns a page once and replays it
@@ -616,5 +704,55 @@ profile pages. All of this needs local live validation.
 ### Known gaps after hardening
 - Encryption at rest: `$AGENT_SURF_HOME` (queue text, receipts, debug folders,
   media snapshots) is stored unencrypted; encrypting it needs a dependency.
-- Accessible names for the click allowlist come from aria-label, innerText or
-  value; names from aria-labelledby are not resolved.
+- Accessible names: aria-labelledby is resolved since Fix 25; aria-owns,
+  CSS generated content and name-from-content recursion are not.
+
+## Review findings (recorded)
+Findings from the code review of the hardening round (Fixes 10-19) and this
+round. Fixed ones name their fix; the rest are recorded here, not fixed.
+
+Fixed:
+- runner.py: items marked seen before they were printed: Fix 21 (also
+  inbox and youtube).
+- cli.py: a broken pipe after items were marked seen (run, inbox, youtube):
+  Fix 21.
+- youtube.py: FORBIDDEN_OPTS guarded by `assert`: Fix 24.
+- har_scrub.py: response bodies and `_webSocketMessages` not scrubbed: Fix 23.
+- har_scrub.py: HAR read/written without an explicit encoding: Fix 23.
+- executor.py: names from aria-labelledby not resolved: Fix 25.
+
+Not fixed (file:line on branch `claude/v2-polish`; recommendation):
+- runner.py:213: no `page.check_domain()` after the first-pass `expand()`
+  (the scroll loop has one). A click that navigates off-site raises inside
+  `expand()` already; add the check anyway for symmetry.
+- sitemap.py:169, sitemap.py:313, runner.py:120, publisher.py:89,
+  executor.py:152: model-written `url_regex` is compiled and run on every
+  response URL; a catastrophic pattern could stall a run (ReDoS). Reject
+  nested quantifiers in validate_map/validate_action_map, cap the pattern
+  length, and only search URLs up to a fixed length.
+- sitemap.py:404, sitemap.py:411, actionmap.py:354, actionmap.py:364,
+  browser.py:358: maps (and DevToolsActivePort) are read/written without
+  `encoding="utf-8"`; on Windows the locale code page is used. Pass the
+  encoding explicitly (existing files are ASCII-only JSON, so this is safe).
+- youtube.py:76 and youtube.py:171: any youtube.com URL is a "video"; a
+  playlist or `&list=` URL extracts every entry. Set `noplaylist: True` for
+  video targets and a `playlistend` cap.
+- har_scrub.py:75: URL fragments and path segments are not redacted (tokens
+  in `#access_token=` or `/reset/<token>`); `urlencode` re-encodes the whole
+  query when one parameter is redacted. Redact fragment parameters with the
+  same pattern; rebuild the query by replacing only the redacted values.
+- har_scrub.py:71/137: values are redacted by name only; a `Bearer ...` or
+  JWT-shaped value under an innocuous name survives. Add value patterns
+  (Bearer, three base64url segments) to the scrub, not only the guard.
+- config.py:45 (ensure_dirs) and store.py:119: AGENT_SURF_HOME is created
+  with the default umask, not 0700. Create it with mode 0o700 (POSIX).
+- cli.py:441: an invalid current action map raises ActionMapError (a
+  ValueError) and exits 1, not 5 (refused, not attempted). Catch it in
+  cmd_publish and exit 5.
+- cli.py:426: `queue approve --all-drafts` approves drafts the user has not
+  looked at. Require `--yes` or list them and ask.
+- cli.py:42: `--json` given before a nested subcommand (`queue --json list`)
+  is overridden by the nested parser's default. Use
+  `argparse.SUPPRESS` defaults on the nested parsers.
+- har_scrub.py (keep-bodies): the credential pattern `auth` also matches
+  keys like `author`, which are redacted; harmless over-redaction.
