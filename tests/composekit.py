@@ -23,7 +23,7 @@ GOOD_MAP = {
                             "id_path": "data.create.result.id", "error_path": "errors"}},
     "permalink_template": "https://compose.test/post/{id}",
     "limits": {"per_hour": 10, "per_day": 50, "min_spacing_s": 30},
-    "lookup": {"page_type": "profile"},
+    "lookup": {"page_type": "profile", "handle": "me"},
 }
 
 
@@ -60,7 +60,7 @@ class FakeBackend:
     def install(self, ctx):
         ctx.route(re.compile(r"^https://compose\.test/api/create"), self._create)
         ctx.route(re.compile(r"^https://compose\.test/post/\w+$"), self._permalink)
-        ctx.route(re.compile(r"^https://compose\.test/profile$"), self._profile)
+        ctx.route(re.compile(r"^https://compose\.test/u/[^/]+$"), self._profile)
 
     def _create(self, route):
         if route.request.method != "POST":

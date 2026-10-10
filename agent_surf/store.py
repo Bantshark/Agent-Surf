@@ -57,6 +57,12 @@ CREATE TABLE IF NOT EXISTS dispatcher_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- Fix 16: the user's own account per site (for unknown-outcome lookups)
+CREATE TABLE IF NOT EXISTS accounts (
+    site TEXT PRIMARY KEY,
+    handle TEXT NOT NULL,
+    set_at TEXT NOT NULL
+);
 -- v2: publishing queue (see outbox.py)
 CREATE TABLE IF NOT EXISTS queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

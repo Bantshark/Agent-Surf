@@ -56,7 +56,7 @@ FEED_SITE = sites.Site("feedtest", ("feed.test",), {
 
 
 COMPOSE_SITE = sites.Site("composetest", ("compose.test",), {
-    "profile": "https://compose.test/profile",
+    "profile": "https://compose.test/u/{handle}",
     "inbox": "https://compose.test/inbox",
 })
 

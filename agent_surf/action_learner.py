@@ -232,6 +232,21 @@ def rehearse(page: ActionPage, m: dict, payload_urls: dict, guard: Any) -> list[
     return notes
 
 
+def fill_lookup(store: Store, m: dict) -> None:
+    """Fix 16: posts, replies and comments get a lookup on the user's own profile
+    page when the site has one and an account handle is set. DMs: a lookup on
+    the thread is out of scope, so none."""
+    from agent_surf import accounts
+
+    site = sites.SITES.get(m["site"])
+    if m["action"] == "dm":
+        m.pop("lookup", None)
+        return
+    handle = accounts.get_handle(store, m["site"])
+    if site is not None and "profile" in site.page_types and handle:
+        m["lookup"] = {"page_type": "profile", "handle": handle}
+
+
 def learn_action(store: Store, page: ActionPage, site: str, action: str, *, client: Any, model: str,
                  maps_dir: Any, target_url: str | None = None, thread_url: str | None = None,
                  start_url: str | None = None, old_map: dict | None = None,
@@ -261,6 +276,7 @@ def learn_action(store: Store, page: ActionPage, site: str, action: str, *, clie
         raise ActionLearnError(str(e)) from None
     m.pop("version", None)
     m.update(site=site, action=action, learned_at=now_iso(), learned_by=model)
+    fill_lookup(store, m)
 
     def evidence(error: str | None, notes: list[str]) -> Path | None:
         if debug_dir is None:
@@ -288,6 +304,11 @@ def learn_action(store: Store, page: ActionPage, site: str, action: str, *, clie
     except ActionMapError as e:
         raise ActionLearnError(str(e)) from None
     log.info("saved %s after a clean rehearsal", path.name)
+    from agent_surf.publisher import lookup_problem
+    problem = lookup_problem(store, m)
+    if problem:
+        log.warning("no working lookup: %s. Without it, an unknown outcome after Post cannot be "
+                    "checked on the account and ends in needs_attention.", problem)
     if keep_debug:
         kept = evidence(None, notes)
         if kept:

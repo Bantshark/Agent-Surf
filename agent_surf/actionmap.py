@@ -313,6 +313,13 @@ def validate_action_map(m: Any) -> list[str]:
                 problems.append(f"lookup: unknown key {k}")
             if site is not None and lookup["page_type"] not in site.page_types:
                 problems.append(f"lookup.page_type: {site.name} has no page type {lookup['page_type']!r}")
+            elif site is not None:
+                needed = sites.placeholders(site.page_types[lookup["page_type"]])
+                for k in ("handle", "query"):
+                    if k in needed and not lookup.get(k):
+                        problems.append(f"lookup: {site.name} {lookup['page_type']} needs {k}")
+                    if k not in needed and lookup.get(k):
+                        problems.append(f"lookup: {site.name} {lookup['page_type']} does not take {k}")
     return problems
 
 

@@ -110,6 +110,24 @@ def build_parser() -> argparse.ArgumentParser:
     ib.add_argument("page_type")
     sub.add_parser("receipts", help="published items and their receipts")
 
+    acct = sub.add_parser("account", help="your own handle per site (for checking unknown outcomes)")
+    asub = acct.add_subparsers(dest="account_command", required=True)
+    aset = asub.add_parser("set", parents=[common])
+    aset.add_argument("site")
+    aset.add_argument("--handle", required=True)
+    asub.add_parser("show", parents=[common])
+
+    acts = sub.add_parser("actions", help="edit learned action maps (always as a new version)")
+    actsub = acts.add_subparsers(dest="actions_command", required=True)
+    sl = actsub.add_parser("set-lookup", parents=[common],
+                           help="where to look for your post after an unknown outcome")
+    sl.add_argument("site")
+    sl.add_argument("action", choices=["post", "reply", "dm", "comment"])
+    sl.add_argument("--page-type", required=True)
+    slg = sl.add_mutually_exclusive_group()
+    slg.add_argument("--handle")
+    slg.add_argument("--query")
+
     pg = sub.add_parser("purge", help="delete old stored items and debug folders (maps, queue, "
                                       "receipts and seen ids are kept)")
     pg.add_argument("--items-older-than", type=int, default=90, metavar="DAYS")
@@ -418,6 +436,44 @@ def cmd_purge(cfg: config.Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_account(cfg: config.Config, args: argparse.Namespace) -> int:
+    from agent_surf import accounts
+
+    with Store(cfg.db_path) as store:
+        if args.account_command == "set":
+            handle = accounts.set_handle(store, args.site, args.handle)
+            log.info("%s account set; learn-action will add a lookup on your profile page", args.site)
+            emit(args, {"site": args.site, "handle": handle})
+        else:
+            rows = accounts.list_accounts(store)
+            emit(args, rows, "\n".join(f"{r['site']}\t{r['handle']}\t{r['set_at']}" for r in rows) or None)
+    return EXIT_OK
+
+
+def cmd_actions(cfg: config.Config, args: argparse.Namespace) -> int:
+    from agent_surf import actionmap
+    from agent_surf.publisher import lookup_problem
+
+    with Store(cfg.db_path) as store:
+        m = actionmap.current_action_map(store, args.site, args.action)
+        if m is None:
+            log.error("no action map for %s %s; run: agent-surf learn-action %s %s",
+                      args.site, args.action, args.site, args.action)
+            return EXIT_ERROR
+        lookup = {"page_type": args.page_type}
+        lookup.update({k: v for k, v in (("handle", args.handle), ("query", args.query)) if v})
+        new = dict(m, lookup=lookup)
+        new.pop("version", None)
+        path = actionmap.save_action_map(store, cfg.maps_dir, new)  # validated; a new version
+        saved = actionmap.load_action_map(path)
+        log.info("saved %s with lookup %s", path.name, lookup)
+        problem = lookup_problem(store, saved)
+        if problem:
+            log.warning("lookup not working yet: %s", problem)
+        emit(args, saved)
+    return EXIT_OK
+
+
 def prune_debug(cfg: config.Config) -> None:
     from agent_surf import retention
 
@@ -428,7 +484,7 @@ def prune_debug(cfg: config.Config) -> None:
 COMMANDS = {"chrome": cmd_chrome, "learn": cmd_learn, "run": cmd_run, "maps": cmd_maps,
             "youtube": cmd_youtube, "scrub": cmd_scrub, "learn-action": cmd_learn_action,
             "queue": cmd_queue, "publish": cmd_publish, "dispatch": cmd_dispatch, "inbox": cmd_inbox,
-            "receipts": cmd_receipts, "purge": cmd_purge}
+            "receipts": cmd_receipts, "purge": cmd_purge, "account": cmd_account, "actions": cmd_actions}
 
 
 def main(argv: list[str] | None = None) -> int:

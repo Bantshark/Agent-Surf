@@ -139,16 +139,29 @@ def read_back(page: ActionPage, permalink: str, payload: dict) -> bool:
         page.raw.wait_for_timeout(300)
 
 
+def lookup_problem(store: Store, amap: dict) -> str | None:
+    """Why an unknown outcome cannot be checked on the account, or None."""
+    lookup = amap.get("lookup")
+    site, action = amap["site"], amap["action"]
+    if not lookup:
+        return (f"no lookup configured for the {site} {action} action map (set one: agent-surf actions "
+                f"set-lookup {site} {action} --page-type profile --handle <you>)")
+    if store.current_map(site, lookup["page_type"]) is None:
+        arg = (f" --handle {lookup['handle']}" if lookup.get("handle") else
+               f" --query {lookup['query']}" if lookup.get("query") else "")
+        return (f"the lookup page {site} {lookup['page_type']} has no reading map "
+                f"(learn: agent-surf learn {site} {lookup['page_type']}{arg})")
+    return None
+
+
 def lookup_post(store: Store, open_page: OpenPage, amap: dict, payload: dict) -> str | None:
     """Unknown outcome: look for the post on the account through the reading
     side (the map's lookup page and its reading map). Returns the item id."""
     lookup = amap.get("lookup")
     text = normalize_text(payload.get("text") or "")
-    if not lookup or not text:
+    if not lookup or not text or lookup_problem(store, amap):
         return None
     row = store.current_map(amap["site"], lookup["page_type"])
-    if row is None:
-        return None
     m = sitemap.load_map(row["path"])
     site = sites.get_site(amap["site"])
     page = open_page(site).read
@@ -200,6 +213,11 @@ def _finish(store: Store, item_id: int, status: str, logrow: _Log | None, *, err
 def resolve_unknown(store: Store, open_page: OpenPage, item: dict, amap: dict, logrow: _Log | None,
                     reason: str) -> PublishResult:
     """Outcome after submit unknown: check the account; never resubmit."""
+    problem = lookup_problem(store, amap)
+    if problem:
+        return _finish(store, item["id"], "needs_attention", logrow,
+                       error=f"outcome unknown after submit ({reason}); could not check the account: "
+                             f"{problem}; not retried - check the account before re-approving")
     try:
         post_id = lookup_post(store, open_page, amap, item["payload"])
     except Exception as e:  # the lookup itself must not cause a retry
