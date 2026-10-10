@@ -59,6 +59,7 @@ class FakeBackend:
         self.times = {}            # id -> ISO creation time (rendered on the profile page)
         self.next_id = 1000
         self.permalink_override = None
+        self.permalink_mode = "article"   # "article" | "sidebar" | "noarticle"
 
     def install(self, ctx):
         ctx.route(re.compile(r"^https://compose\.test/api/create"), self._create)
@@ -86,15 +87,22 @@ class FakeBackend:
     def _article(self, pid, text):
         when = self.times.get(pid)
         stamp = f'<time class="created">{when}</time>' if when else ""
-        return f'<article data-post-id="{pid}"><p class="text">{html.escape(text)}</p>{stamp}</article>'
+        return (f'<article data-post-id="{pid}"><p class="text">{html.escape(text)}</p>{stamp}'
+                f'<a href="/post/{pid}">permalink</a></article>')
 
     def _permalink(self, route):
         pid = route.request.url.rsplit("/", 1)[-1]
         text = self.permalink_override if self.permalink_override is not None else self.posts.get(pid)
         if text is None:
             return route.fulfill(status=404, content_type="text/html", body="<h1>Not found</h1>")
-        route.fulfill(status=200, content_type="text/html; charset=utf-8",
-                      body=f"<title>Post</title><main>{self._article(pid, text)}</main>")
+        if self.permalink_mode == "sidebar":   # the post shows other text; the sidebar shows ours
+            body = (f"<main>{self._article(pid, 'Something unrelated')}</main>"
+                    f"<aside><p>Trending: {html.escape(text)}</p></aside>")
+        elif self.permalink_mode == "noarticle":  # no element for the post at all
+            body = f"<main><div><p>{html.escape(text)}</p></div></main>"
+        else:
+            body = f"<main>{self._article(pid, text)}</main>"
+        route.fulfill(status=200, content_type="text/html; charset=utf-8", body=f"<title>Post</title>{body}")
 
     def _profile(self, route):
         arts = "".join(self._article(pid, t) for pid, t in reversed(list(self.posts.items())))

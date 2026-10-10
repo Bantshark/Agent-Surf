@@ -123,20 +123,58 @@ def _await_dom_confirm(page: ActionPage, amap: dict) -> tuple[str | None, str | 
     return post_id, None
 
 
-def read_back(page: ActionPage, permalink: str, payload: dict) -> bool:
-    """Open the permalink (on-site only) and check it shows the approved text."""
+# Fix 18: the text of the element for THIS post: the closest article (or the
+# map's readback.target) that contains a link whose href includes the post id.
+_POST_TEXT_JS = """([pid, sel]) => {
+  for (const a of document.querySelectorAll('a[href]')) {
+    if (!(a.getAttribute('href') || '').includes(pid) && !(a.href || '').includes(pid)) continue;
+    let el = null;
+    try { el = a.closest(sel); } catch (e) { return null; }
+    if (el) return el.innerText || el.textContent || '';
+  }
+  return null;
+}"""
+
+
+def _readback_selector(amap: dict | None) -> str:
+    """CSS for the post element: readback.target if the map has one, else articles."""
+    t = ((amap or {}).get("readback") or {}).get("target") or {}
+    if t.get("css"):
+        return t["css"]
+    if t.get("testid"):
+        return f'[data-testid="{t["testid"]}"]'
+    if t.get("role"):
+        return f'[role="{t["role"]}"]' + (", article" if t["role"] == "article" else "")
+    return "article, [role=article]"
+
+
+def read_back(page: ActionPage, permalink: str, payload: dict, post_id: str = "",
+              amap: dict | None = None) -> bool | str:
+    """Open the permalink (on-site only) and check the approved text is shown in
+    the element for this post. True: found there. "page": no such element, but
+    the page shows the text. False: not shown (or the post element shows other
+    text)."""
     page.goto(permalink)
     want = normalize_text(payload.get("text") or "")
+    sel = _readback_selector(amap)
     deadline = time.monotonic() + READBACK_TIMEOUT_S
     while True:
         try:
-            shown = normalize_text(page.raw.locator("body").inner_text())
+            post_text = page.raw.evaluate(_POST_TEXT_JS, [str(post_id), sel]) if post_id else None
         except Exception:
-            shown = ""
-        if (want and want in shown) or (not want and shown):
-            return True
+            post_text = None
+        if post_text is not None:
+            shown = normalize_text(post_text)
+            if (want and want in shown) or (not want and shown):
+                return True
         if time.monotonic() >= deadline:
-            return False
+            if post_text is not None:
+                return False  # the post's own element does not show the text
+            try:
+                body = normalize_text(page.raw.locator("body").inner_text())
+            except Exception:
+                body = ""
+            return "page" if (want and want in body) or (not want and body) else False
         page.raw.wait_for_timeout(300)
 
 
@@ -398,7 +436,7 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
     receipt = {"post_id": post_id, "permalink": amap["permalink_template"].format(id=post_id),
                "confirmed_at": _iso(datetime.now(timezone.utc)), "via": via}
     try:
-        matched = read_back(page, receipt["permalink"], payload)
+        matched = read_back(page, receipt["permalink"], payload, post_id, amap)
     except Exception as e:
         matched = False
         notes.append(f"read-back failed ({type(e).__name__})")
@@ -406,7 +444,9 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
         return _finish(store, item_id, "needs_attention", logrow, receipt=dict(receipt, read_back=False),
                        error=f"post {post_id} created but its permalink does not show the approved text",
                        notes=notes)
-    return _finish(store, item_id, "published", logrow, receipt=dict(receipt, read_back=True), notes=notes)
+    # read_back: True (the post's own element) or "page" (no post element found;
+    # the page shows the text). Both are published; "page" is surfaced in receipts.
+    return _finish(store, item_id, "published", logrow, receipt=dict(receipt, read_back=matched), notes=notes)
 
 
 def recover_publishing(store: Store, open_page: OpenPage) -> list[PublishResult]:

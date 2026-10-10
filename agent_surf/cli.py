@@ -419,7 +419,8 @@ def cmd_receipts(cfg: config.Config, args: argparse.Namespace) -> int:
         rows = [{"id": i["id"], "site": i["site"], "action": i["action"], **(i["receipt"] or {})}
                 for i in outbox.list_items(store, "published")]
     emit(args, rows, "\n".join(f"{r['id']}\t{r['site']} {r['action']}\t{r.get('post_id')}\t"
-                               f"{r.get('confirmed_at')}\t{r.get('permalink')}" for r in rows) or None)
+                               f"{r.get('confirmed_at')}\t{r.get('permalink')}\t"
+                               f"read_back={r.get('read_back', '-')}" for r in rows) or None)
     return EXIT_OK
 
 

@@ -53,7 +53,7 @@ def click_allowed(label: str, allowlist: tuple) -> bool:
 
 ALLOWED_KEYS = {"site", "action", "version", "start", "steps", "submit", "discard", "dismiss",
                 "confirm", "permalink_template", "limits", "lookup", "learned_at", "learned_by",
-                "composer"}
+                "composer", "readback"}
 REQUIRED_KEYS = {"site", "action", "start", "steps", "submit", "discard", "confirm",
                  "permalink_template", "limits"}
 STEP_KEYS = {"op", "target", "value", "state", "preview"}
@@ -196,6 +196,12 @@ def validate_action_map(m: Any) -> list[str]:
             if not isinstance(requires, list) or not all(r in PAYLOAD_KEYS for r in requires):
                 problems.append(f"start.requires: must be a list of {', '.join(PAYLOAD_KEYS)}")
                 requires = []
+    if "readback" in m:
+        rb = m["readback"]
+        if not isinstance(rb, dict) or set(rb) != {"target"}:
+            problems.append("readback: must be an object with only a target")
+        else:
+            _check_target(rb["target"], "readback", problems)
     if "composer" in m:
         comp = m["composer"]
         if not isinstance(comp, dict) or set(comp) != {"target"}:
