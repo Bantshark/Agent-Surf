@@ -43,17 +43,20 @@ def good_map(**changes):
 import html
 import json
 import re
+from datetime import datetime, timezone
 
 
 class FakeBackend:
     """mode: "ok" -> create returns an id; "errors" -> HTTP 200 with {"errors": [...]};
-    "drop" -> the post is created server-side but the connection is lost."""
+    "drop" -> the post is created server-side but the connection is lost;
+    "lost" -> the connection is lost and nothing is created."""
 
     def __init__(self, mode="ok"):
         self.mode = mode
         self.posts = {}            # id -> text, newest last
         self.create_calls = 0
         self.bodies = []           # create request bodies, in order
+        self.times = {}            # id -> ISO creation time (rendered on the profile page)
         self.next_id = 1000
         self.permalink_override = None
 
@@ -70,16 +73,20 @@ class FakeBackend:
         self.bodies.append(body)
         if self.mode == "errors":
             return route.fulfill(status=200, json={"errors": [{"message": "Something went wrong"}]})
+        if self.mode == "lost":  # connection lost before anything was created
+            return route.abort()
         pid = str(self.next_id)
         self.next_id += 1
         self.posts[pid] = body.get("text", "")
+        self.times[pid] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if self.mode == "drop":
             return route.abort()
         route.fulfill(status=200, json={"data": {"create": {"result": {"id": pid}}}})
 
-    @staticmethod
-    def _article(pid, text):
-        return (f'<article data-post-id="{pid}"><p class="text">{html.escape(text)}</p></article>')
+    def _article(self, pid, text):
+        when = self.times.get(pid)
+        stamp = f'<time class="created">{when}</time>' if when else ""
+        return f'<article data-post-id="{pid}"><p class="text">{html.escape(text)}</p>{stamp}</article>'
 
     def _permalink(self, route):
         pid = route.request.url.rsplit("/", 1)[-1]

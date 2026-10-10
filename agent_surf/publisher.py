@@ -11,6 +11,7 @@ through the reading side instead.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -154,13 +155,59 @@ def lookup_problem(store: Store, amap: dict) -> str | None:
     return None
 
 
-def lookup_post(store: Store, open_page: OpenPage, amap: dict, payload: dict) -> str | None:
+TIME_FIELDS = ("created_at", "timestamp", "time", "date")
+LOOKUP_SLACK_S = 120
+
+
+def parse_time_value(value: Any) -> datetime | None:
+    """ISO 8601, epoch seconds/milliseconds, RFC 2822 or X's legacy created_at
+    ('Wed Oct 10 20:19:24 +0000 2026'); None if it does not parse."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        secs = value / 1000 if value > 1e11 else value
+        return datetime.fromtimestamp(secs, timezone.utc)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    v = value.strip()
+    if v.isdigit():
+        return parse_time_value(int(v))
+    try:
+        dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(v, "%a %b %d %H:%M:%S %z %Y")
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(v)
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def receipt_post_ids(store: Store) -> set[str]:
+    out = set()
+    for (receipt,) in store.conn.execute("SELECT receipt_json FROM queue WHERE receipt_json IS NOT NULL"):
+        pid = json.loads(receipt).get("post_id")
+        if pid:
+            out.add(str(pid))
+    return out
+
+
+def lookup_post(store: Store, open_page: OpenPage, amap: dict, payload: dict,
+                submitted_at: datetime | None = None) -> tuple[str, str] | None:
     """Unknown outcome: look for the post on the account through the reading
-    side (the map's lookup page and its reading map). Returns the item id."""
+    side (the map's lookup page and its reading map). Fix 17: a candidate with
+    the same text is accepted only if (a) its id is not already in a receipt,
+    and (b) when the reading map extracts a time field (created_at, timestamp,
+    time, date), it parses and is >= submitted_at - 120 s. Of the rest, the
+    newest wins (by time, else page order). Returns (item id, rule) or None."""
     lookup = amap.get("lookup")
     text = normalize_text(payload.get("text") or "")
     if not lookup or not text or lookup_problem(store, amap):
         return None
+    taken = receipt_post_ids(store)
     row = store.current_map(amap["site"], lookup["page_type"])
     m = sitemap.load_map(row["path"])
     site = sites.get_site(amap["site"])
@@ -171,10 +218,29 @@ def lookup_post(store: Store, open_page: OpenPage, amap: dict, payload: dict) ->
     runner.wait_for_content(m, page, since, lambda p: None)
     for source in [m["source"]] + [s for s in sitemap.SOURCES if s != m["source"] and s in m]:
         responses = page.buffer.since(since) if source in sitemap.STREAM_SOURCES else None
-        for it in runner.extract_items(m, source, page, responses):
-            if it["item_id"] and any(isinstance(v, str) and normalize_text(v) == text
-                                     for v in it["fields"].values()):
-                return it["item_id"]
+        time_keys = [k for k in TIME_FIELDS if k in m[source]["fields"]]
+        candidates: list[tuple[datetime | None, int, str, str]] = []
+        for order, it in enumerate(runner.extract_items(m, source, page, responses)):
+            if not it["item_id"] or not any(isinstance(v, str) and normalize_text(v) == text
+                                            for k, v in it["fields"].items() if k not in TIME_FIELDS):
+                continue
+            if str(it["item_id"]) in taken:
+                continue  # rule (a): an older post that already has a receipt
+            when = None
+            if time_keys:
+                when = next((t for t in (parse_time_value(it["fields"].get(k)) for k in time_keys) if t), None)
+                if when is None or (submitted_at is not None
+                                    and when < submitted_at - timedelta(seconds=LOOKUP_SLACK_S)):
+                    continue  # rule (b): no parseable time, or older than the submit
+                rule = (f"same text, id not in any receipt, {time_keys[0]} >= submit - {LOOKUP_SLACK_S} s"
+                        if submitted_at else "same text, id not in any receipt (submit time unknown)")
+            else:
+                rule = "same text, id not in any receipt (no time field)"
+            candidates.append((when, order, str(it["item_id"]), rule))
+        if candidates:
+            timed = [c for c in candidates if c[0] is not None]
+            best = max(timed, key=lambda c: c[0]) if timed else min(candidates, key=lambda c: c[1])
+            return best[2], best[3] + ("; newest of several" if len(candidates) > 1 else "")
     return None
 
 
@@ -210,6 +276,16 @@ def _finish(store: Store, item_id: int, status: str, logrow: _Log | None, *, err
     return PublishResult(item, notes or [])
 
 
+def _submitted_at(store: Store, item_id: int, logrow: "_Log | None") -> datetime | None:
+    """When this item was last submitted (the dispatch log)."""
+    if logrow is not None:
+        row = store.conn.execute("SELECT submitted_at FROM dispatch_log WHERE id = ?", (logrow.id,)).fetchone()
+    else:
+        row = store.conn.execute("SELECT submitted_at FROM dispatch_log WHERE queue_id = ? AND submitted_at"
+                                 " IS NOT NULL ORDER BY id DESC LIMIT 1", (item_id,)).fetchone()
+    return datetime.fromisoformat(row["submitted_at"]) if row and row["submitted_at"] else None
+
+
 def resolve_unknown(store: Store, open_page: OpenPage, item: dict, amap: dict, logrow: _Log | None,
                     reason: str) -> PublishResult:
     """Outcome after submit unknown: check the account; never resubmit."""
@@ -219,13 +295,14 @@ def resolve_unknown(store: Store, open_page: OpenPage, item: dict, amap: dict, l
                        error=f"outcome unknown after submit ({reason}); could not check the account: "
                              f"{problem}; not retried - check the account before re-approving")
     try:
-        post_id = lookup_post(store, open_page, amap, item["payload"])
+        found = lookup_post(store, open_page, amap, item["payload"], _submitted_at(store, item["id"], logrow))
     except Exception as e:  # the lookup itself must not cause a retry
-        post_id = None
+        found = None
         reason += f"; lookup failed ({type(e).__name__})"
-    if post_id:
+    if found:
+        post_id, rule = found
         receipt = {"post_id": post_id, "permalink": amap["permalink_template"].format(id=post_id),
-                   "confirmed_at": _iso(datetime.now(timezone.utc)), "via": "account lookup"}
+                   "confirmed_at": _iso(datetime.now(timezone.utc)), "via": "account lookup", "match": rule}
         return _finish(store, item["id"], "published", logrow, receipt=receipt)
     return _finish(store, item["id"], "needs_attention", logrow,
                    error=f"outcome unknown after submit ({reason}); not found on the account; "
