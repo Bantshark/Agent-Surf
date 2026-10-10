@@ -1,9 +1,12 @@
-"""Scrub guard: nothing under tests/fixtures/ may carry cookies, auth headers or
-token-shaped headers. This test must never be skipped."""
+"""Scrub guard: nothing under tests/fixtures/ may carry cookies, auth headers,
+token-shaped headers, or email- or phone-shaped strings (Fix 23). This test
+must never be skipped."""
 
 import json
 import re
 from pathlib import Path
+
+import pytest
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FORBIDDEN_WORDS = re.compile(r"(?i)cookie|authorization")
@@ -11,6 +14,10 @@ TOKENISH = re.compile(r"(?i)token|auth|session|csrf")
 HEADER_LINE = re.compile(r"(?im)^\s*[\w-]*(token|auth|session|csrf)[\w-]*\s*:\s*\S")
 JSON_HEADER = re.compile(r'(?i)"name"\s*:\s*"[^"]*(token|auth|session|csrf)[^"]*"')
 BEARER = re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{8,}")
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+# Separators required, so ids, timestamps and sizes are not phone numbers.
+PHONE = re.compile(r"(?<![\w+.-])(?:\+\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}(?![\w-])"
+                   r"|(?<![\w+])\+\d{10,14}(?!\w)")
 # In a .har, a {"name": ..., "value": "REDACTED"} pair is what har_scrub leaves
 # for a redacted query/body param. Only the token-shaped-name check skips these
 # pairs; every other check still sees the full text, and problems_in_har still
@@ -47,7 +54,9 @@ def problems_in_text(text, is_har=False):
     for rx, label, body in ((FORBIDDEN_WORDS, "cookie/authorization", text),
                             (HEADER_LINE, "token-shaped header line", text),
                             (JSON_HEADER, "token-shaped header name", name_text),
-                            (BEARER, "bearer token", text)):
+                            (BEARER, "bearer token", text),
+                            (EMAIL, "email address", text),
+                            (PHONE, "phone number", text)):
         m = rx.search(body)
         if m:
             problems.append(f"{label}: {m.group(0)[:40]!r}")
@@ -137,3 +146,24 @@ def test_guard_still_flags_token_name_with_real_value():
     assert any(p.startswith("token-shaped header name")
                for p in problems_in_text('{"name": "auth_token", "value": "REDACTED"}'))
 
+
+
+@pytest.mark.parametrize("planted, label", [
+    ("someone" + "@" + "example.org", "email address"),
+    ("first.last+tag" + "@" + "mail.example.co.uk", "email address"),
+    ("+1 415 555 0100".replace(" 0100", "-0100").replace("415 555", "(415) 555"), "phone number"),
+    ("415.555.0100", "phone number"),
+    ("+" + "447700900123", "phone number"),
+])
+def test_guard_catches_planted_email_or_phone(planted, label):
+    har = planted_har()
+    har["log"]["entries"][0]["response"]["content"]["text"] = json.dumps({"contact": planted})
+    assert any(p.startswith(label) for p in guard_problems(as_text(har), is_har=True)), planted
+    assert any(p.startswith(label) for p in problems_in_text(f"call {planted} today"))
+
+
+@pytest.mark.parametrize("benign", ["1696766400000", "2026-10-08T12:00:00+00:00", "icon@2x", "@alice",
+                                    "id=1234567890123", "size 4096 bytes", "v1.2.3"])
+def test_guard_ignores_ids_dates_and_handles(benign):
+    problems = problems_in_text(f'{{"x": "{benign}"}}')
+    assert not [p for p in problems if p.startswith(("email", "phone"))], benign

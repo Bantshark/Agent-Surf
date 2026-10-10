@@ -66,9 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
     yt.add_argument("--subs", action="store_true", help="include subtitles")
     yt.add_argument("--comments", action="store_true", help="include comments (best-effort)")
 
-    scrub = sub.add_parser("scrub", help="strip cookies/auth from a HAR file")
+    scrub = sub.add_parser("scrub", help="strip cookies, auth and response bodies from a HAR file")
     scrub.add_argument("src")
     scrub.add_argument("dst")
+    scrub.add_argument("--keep-bodies", action="store_true",
+                       help="keep JSON/text response bodies (credential and PII keys still redacted)")
 
     # v2: write layer
     la = sub.add_parser("learn-action", help="learn a composer once (rehearsed, never submitted)")
@@ -318,9 +320,10 @@ def cmd_youtube(cfg: config.Config, args: argparse.Namespace) -> int:
 def cmd_scrub(cfg: config.Config, args: argparse.Namespace) -> int:
     from agent_surf import har_scrub
 
-    stats = har_scrub.scrub_file(args.src, args.dst)
+    stats = har_scrub.scrub_file(args.src, args.dst, keep_bodies=args.keep_bodies)
     log.info("scrubbed %s -> %s: removed %d header(s), %d cookie(s); redacted %d param(s), %d body(ies)",
              args.src, args.dst, stats.headers, stats.cookies, stats.params, stats.bodies)
+    log.info("a scrubbed HAR still shows page structure and URLs; commit it only if it is synthetic")
     emit(args, {"headers": stats.headers, "cookies": stats.cookies, "params": stats.params,
                 "bodies": stats.bodies})
     return EXIT_OK

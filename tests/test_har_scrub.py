@@ -88,13 +88,105 @@ def test_scrub_file_roundtrip(tmp_path, chromium):
     har_scrub.scrub_file(src, dst)
     assert SECRET not in dst.read_text()
 
-    # A clean fixture survives scrubbing unchanged and still replays.
+    # A synthetic fixture scrubbed with --keep-bodies still replays.
     fixture = tmp_path / "feed.har"
-    har_scrub.scrub_file("tests/fixtures/feed.har", fixture)
-    assert json.loads(fixture.read_text()) == json.loads(open("tests/fixtures/feed.har").read())
+    har_scrub.scrub_file("tests/fixtures/feed.har", fixture, keep_bodies=True)
     ctx = chromium.new_context()
     ctx.route_from_har(fixture, not_found="abort")
     page = ctx.new_page()
     page.goto("https://feed.test/")
     assert page.title() == "Feed Test"
     ctx.close()
+
+
+# Fix 23: response bodies are dropped unless --keep-bodies.
+
+PII = {"email": "someone" + "@" + "example.invalid", "phone_number": "555 0100 000",
+       "password": "hunter2-synthetic", "birthDate": "2000-01-01", "home_address": "1 Synthetic Way",
+       "dob": "2000-01-01", "ssn": "000-00-0000"}
+
+
+def body_har():
+    user = dict(PII, name="Alice", session_id="SYNTHETIC-SESSION", posts=[{"id": "1", "text": "hi"}])
+    return {"log": {"version": "1.2", "entries": [
+        {"request": {"method": "GET", "url": "https://feed.test/api/user", "headers": []},
+         "response": {"status": 200, "headers": [],
+                      "content": {"mimeType": "application/json", "size": 999, "text": json.dumps(user)}}},
+        {"request": {"method": "GET", "url": "https://feed.test/", "headers": []},
+         "response": {"status": 200, "headers": [],
+                      "content": {"mimeType": "text/html", "text": "<p>Hello Alice</p>"}}},
+        {"request": {"method": "GET", "url": "https://feed.test/a.png", "headers": []},
+         "response": {"status": 200, "headers": [],
+                      "content": {"mimeType": "image/png", "size": 4, "text": "iVBORw==", "encoding": "base64"}}},
+        {"request": {"method": "GET", "url": "wss://feed.test/ws", "headers": []},
+         "response": {"status": 101, "headers": [], "content": {"mimeType": "x-unknown", "size": 0}},
+         "_webSocketMessages": [{"type": "receive", "opcode": 1, "data": json.dumps({"email": PII["email"],
+                                                                                     "text": "hi"})}]},
+    ]}}
+
+
+def test_default_drops_every_response_body():
+    clean, stats = scrub_har(body_har())
+    entries = clean["log"]["entries"]
+    assert entries[0]["response"]["content"]["text"] == "REDACTED (999 bytes, application/json)"
+    assert entries[1]["response"]["content"]["text"] == "REDACTED (18 bytes, text/html)"
+    png = entries[2]["response"]["content"]
+    assert png["text"] == "REDACTED (4 bytes, image/png)" and "encoding" not in png
+    assert entries[3]["_webSocketMessages"][0]["data"].startswith("REDACTED (")
+    text = json.dumps(clean)
+    for v in PII.values():
+        assert v not in text
+    assert "Alice" not in text and "SYNTHETIC-SESSION" not in text
+    assert stats.bodies == 4
+
+
+def test_keep_bodies_redacts_pii_and_credential_keys():
+    clean, stats = scrub_har(body_har(), keep_bodies=True)
+    entries = clean["log"]["entries"]
+    user = json.loads(entries[0]["response"]["content"]["text"])
+    for k in PII:
+        assert user[k] == REDACTED, k
+    assert user["session_id"] == REDACTED
+    assert user["name"] == "Alice" and user["posts"] == [{"id": "1", "text": "hi"}]
+    assert entries[1]["response"]["content"]["text"] == "<p>Hello Alice</p>"      # text kept
+    assert entries[2]["response"]["content"]["text"] == "REDACTED (4 bytes, image/png)"  # binary dropped
+    ws = json.loads(entries[3]["_webSocketMessages"][0]["data"])
+    assert ws == {"email": REDACTED, "text": "hi"}
+    text = json.dumps(clean)
+    for v in PII.values():
+        assert v not in text
+
+
+def test_request_bodies_redact_pii_keys():
+    har = {"log": {"entries": [{"request": {
+        "method": "POST", "url": "https://feed.test/login", "headers": [],
+        "postData": {"mimeType": "application/x-www-form-urlencoded", "text": "user=a&password=hunter2",
+                     "params": [{"name": "user", "value": "a"}, {"name": "password", "value": "hunter2"}]}}}]}}
+    clean, _ = scrub_har(har)
+    post = clean["log"]["entries"][0]["request"]["postData"]
+    assert post["text"] == f"user=a&password={REDACTED}" and post["params"][1]["value"] == REDACTED
+
+
+def test_cli_keep_bodies_flag(tmp_path):
+    from agent_surf import cli
+
+    src, dst = tmp_path / "in.har", tmp_path / "out.har"
+    src.write_text(json.dumps(body_har()), encoding="utf-8")
+    assert cli.main(["scrub", str(src), str(dst)]) == 0
+    assert "Alice" not in dst.read_text(encoding="utf-8")
+    assert cli.main(["scrub", str(src), str(dst), "--keep-bodies"]) == 0
+    out = dst.read_text(encoding="utf-8")
+    assert "Alice" in out and PII["email"] not in out
+
+
+def test_keep_bodies_redacts_values_in_html():
+    html = ('<meta name="csrf-token" content="SYNTH-CSRF"><input type="hidden" name="authenticity_token" '
+            'value="SYNTH-AUTH"><script>window.cfg = {"email": "x' + '@' + 'example.invalid", "theme": "dark"}'
+            '</script><p class="post">kept text</p>')
+    har = {"log": {"entries": [{"request": {"method": "GET", "url": "https://feed.test/", "headers": []},
+                                "response": {"status": 200, "headers": [],
+                                             "content": {"mimeType": "text/html", "text": html}}}]}}
+    clean, _ = scrub_har(har, keep_bodies=True)
+    out = clean["log"]["entries"][0]["response"]["content"]["text"]
+    assert "SYNTH-CSRF" not in out and "SYNTH-AUTH" not in out and "example.invalid" not in out
+    assert "kept text" in out and '"theme": "dark"' in out
