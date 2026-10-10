@@ -89,24 +89,47 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+QUEUE_ADDED_COLUMNS = {
+    "media_snapshot_json": "TEXT",   # Fix 13: approved copies of the media, uploaded at publish
+}
+
+
 class Store:
     def __init__(self, path: str | Path):
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
+            self.home: Path | None = Path(path).parent
+        else:
+            self.home = None
+        self._tmp_home: str | None = None
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self._migrate()
 
     def _migrate(self) -> None:
-        have = {r["name"] for r in self.conn.execute("PRAGMA table_info(maps)")}
-        with self.conn:
-            for col, decl in MAPS_ADDED_COLUMNS.items():
-                if col not in have:
-                    self.conn.execute(f"ALTER TABLE maps ADD COLUMN {col} {decl}")
+        for table, columns in (("maps", MAPS_ADDED_COLUMNS), ("queue", QUEUE_ADDED_COLUMNS)):
+            have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            with self.conn:
+                for col, decl in columns.items():
+                    if col not in have:
+                        self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+    @property
+    def media_dir(self) -> Path:
+        """<AGENT_SURF_HOME>/media (beside surf.db); a temp dir for in-memory stores."""
+        if self.home is not None:
+            return self.home / "media"
+        if self._tmp_home is None:
+            import tempfile
+            self._tmp_home = tempfile.mkdtemp(prefix="agent-surf-media-")
+        return Path(self._tmp_home) / "media"
 
     def close(self) -> None:
         self.conn.close()
+        if self._tmp_home is not None:
+            import shutil
+            shutil.rmtree(self._tmp_home, ignore_errors=True)
 
     def __enter__(self) -> "Store":
         return self

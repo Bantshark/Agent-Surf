@@ -241,7 +241,7 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
         raise PublishRefused(cap)
 
     site = sites.get_site(item["site"])
-    payload = item["payload"]
+    payload = outbox.publish_payload(item)   # approved text + the approved media snapshots
     outbox.transition(store, item_id, "publishing", count_attempt=True)
     logrow = _Log(store, item, now)
     notes: list[str] = []

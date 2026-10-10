@@ -39,7 +39,7 @@ def test_read_only_page_has_no_write_methods():
 
 def test_publisher_takes_content_only_from_the_queue():
     src = (PKG / "publisher.py").read_text()
-    assert 'payload = item["payload"]' in src  # the approved queue item
+    assert "payload = outbox.publish_payload(item)" in src  # the approved queue item (+ snapshots)
     tree = ast.parse(src)
     calls = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
     assert not calls & {"fill", "type", "insert_text", "set_input_files"}  # only the executor enters content

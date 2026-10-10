@@ -34,9 +34,12 @@ def test_add_and_approve_records_hash(store, img):
 def test_hash_covers_payload_and_media_bytes(store, img):
     qid = outbox.add(store, "x", "post", {"text": "t", "media": [str(img)]})
     item = outbox.approve(store, qid)
-    img.write_bytes(b"\x89PNG\r\n\x1a\n different bytes")
+    img.write_bytes(b"\x89PNG\r\n\x1a\n different bytes")   # the original: no longer matters (Fix 13)
+    assert outbox.verify_approved(outbox.get(store, qid)) is None
+    (snap,) = item["media_snapshot"]
+    open(snap, "wb").write(b"\x89PNG\r\n\x1a\n tampered snapshot")
     assert "content_hash mismatch" in outbox.verify_approved(outbox.get(store, qid))
-    img.write_bytes(b"\x89PNG\r\n\x1a\n synthetic image bytes")
+    open(snap, "wb").write(b"\x89PNG\r\n\x1a\n synthetic image bytes")
     assert outbox.verify_approved(outbox.get(store, qid)) is None
     payload = dict(item["payload"], text="edited after approval")
     store.conn.execute("UPDATE queue SET payload_json = ? WHERE id = ?", (json.dumps(payload), qid))
@@ -57,8 +60,10 @@ def test_media_must_exist_and_be_regular(store, img, tmp_path):
 
 def test_approved_then_media_removed_is_refused(store, img):
     qid = outbox.add(store, "x", "post", {"media": [str(img)]})
-    outbox.approve(store, qid)
-    os.remove(img)
+    item = outbox.approve(store, qid)
+    os.remove(img)                       # the original: the snapshot is what gets published
+    assert outbox.verify_approved(outbox.get(store, qid)) is None
+    os.remove(item["media_snapshot"][0])
     assert "media changed" in outbox.verify_approved(outbox.get(store, qid))
 
 

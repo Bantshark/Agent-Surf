@@ -85,8 +85,8 @@ def test_checked_again_at_approve_and_publish(store, tmp_path):
     with pytest.raises(QueueError, match="does not match"):
         outbox.approve(store, qid)
     open(path, "wb").write(MAGIC[".png"])
-    outbox.approve(store, qid)
-    open(path, "wb").write(b"swapped after approval")
+    item = outbox.approve(store, qid)
+    open(item["media_snapshot"][0], "wb").write(b"swapped after approval")
     assert "does not match" in outbox.verify_approved(outbox.get(store, qid))
 
 

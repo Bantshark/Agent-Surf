@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
@@ -153,11 +154,12 @@ def normalize_payload(site: str, action: str, payload: dict) -> dict:
     return out
 
 
-def content_hash(payload: dict) -> str:
-    """sha256 of the canonical payload plus the bytes of each media file."""
+def content_hash(payload: dict, media_paths: list[str] | None = None) -> str:
+    """sha256 of the canonical payload plus the bytes of each media file: the
+    approved snapshots (Fix 13) when given, else the payload's own paths."""
     h = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
                                   ensure_ascii=False).encode())
-    for path in payload.get("media") or []:
+    for path in (payload.get("media") or []) if media_paths is None else media_paths:
         h.update(b"\0")
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 16), b""):
@@ -176,7 +178,50 @@ def to_dict(row: Any) -> dict:
     d = dict(row)
     d["payload"] = json.loads(d.pop("payload_json"))
     d["receipt"] = json.loads(d.pop("receipt_json")) if d.get("receipt_json") else None
+    snap = d.pop("media_snapshot_json", None)
+    d["media_snapshot"] = json.loads(snap) if snap else None
     return d
+
+
+# ---------------------------------------------------------------------------
+# Fix 13: media snapshots. Approval copies the media into
+# <AGENT_SURF_HOME>/media/<id>/; the hash covers those bytes and publish uploads
+# only them, so editing the originals afterwards changes nothing.
+
+def snapshot_dir(store: Store, item_id: int) -> Path:
+    return store.media_dir / str(item_id)
+
+
+def remove_snapshot(store: Store, item_id: int) -> None:
+    shutil.rmtree(snapshot_dir(store, item_id), ignore_errors=True)
+    with store.conn:
+        store.conn.execute("UPDATE queue SET media_snapshot_json = NULL WHERE id = ?", (item_id,))
+
+
+def take_snapshot(store: Store, item_id: int, paths: list[str]) -> list[str]:
+    folder = snapshot_dir(store, item_id)
+    shutil.rmtree(folder, ignore_errors=True)       # re-approval re-snapshots
+    folder.mkdir(parents=True)
+    if os.name == "posix":
+        os.chmod(store.media_dir, 0o700)
+        os.chmod(folder, 0o700)
+    out = []
+    for n, src in enumerate(paths):
+        dst = folder / f"{n}{Path(src).suffix.lower()}"
+        shutil.copyfile(src, dst)
+        if os.name == "posix":
+            os.chmod(dst, 0o600)
+        out.append(str(dst))
+    return out
+
+
+def publish_payload(item: dict) -> dict:
+    """The approved payload as it is published: media replaced by the approved
+    snapshots (items approved before snapshots existed keep their own paths)."""
+    payload = dict(item["payload"])
+    if payload.get("media") and item.get("media_snapshot"):
+        payload["media"] = list(item["media_snapshot"])
+    return payload
 
 
 def get(store: Store, item_id: int) -> dict:
@@ -232,6 +277,8 @@ def transition(store: Store, item_id: int, new_status: str, *, last_error: str |
             f"UPDATE queue SET {', '.join(sets)} WHERE id = ? AND status = ?", (*args, item_id, old))
     if cur.rowcount != 1:  # someone else moved it first
         raise IllegalTransition(f"queue item {item_id} changed status concurrently")
+    if new_status in ("published", "rejected"):
+        remove_snapshot(store, item_id)  # receipt recorded, or never to be published
     return get(store, item_id)
 
 
@@ -240,8 +287,15 @@ def approve(store: Store, item_id: int) -> dict:
     if item["status"] not in APPROVABLE:
         raise IllegalTransition(f"queue item {item_id} is {item['status']}; only "
                                 f"{', '.join(sorted(APPROVABLE))} items can be approved")
-    check_media(item["payload"].get("media") or [])
-    return transition(store, item_id, "approved", content_hash_value=content_hash(item["payload"]))
+    media = item["payload"].get("media") or []
+    check_media(media)
+    snaps = take_snapshot(store, item_id, media) if media else []
+    check_media(snaps)
+    with store.conn:
+        store.conn.execute("UPDATE queue SET media_snapshot_json = ? WHERE id = ?",
+                           (json.dumps(snaps) if snaps else None, item_id))
+    return transition(store, item_id, "approved",
+                      content_hash_value=content_hash(item["payload"], snaps if media else None))
 
 
 def approve_all_drafts(store: Store) -> list[dict]:
@@ -256,9 +310,10 @@ def verify_approved(item: dict) -> str | None:
     """None if the item may be published as approved, else the reason it may not."""
     if item["status"] != "approved":
         return f"status is {item['status']}, not approved"
+    media = publish_payload(item).get("media") or []   # the snapshots (or legacy originals)
     try:
-        check_media(item["payload"].get("media") or [])
-        current = content_hash(item["payload"])
+        check_media(media)
+        current = content_hash(item["payload"], media if item["payload"].get("media") else None)
     except (QueueError, OSError) as e:
         return f"media changed since approval: {e}"
     if current != item["content_hash"]:
