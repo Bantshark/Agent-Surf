@@ -41,15 +41,27 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
-def get_last_tick(store: Store) -> datetime | None:
-    row = store.conn.execute("SELECT value FROM dispatcher_state WHERE key = 'last_tick'").fetchone()
+def _get(store: Store, key: str) -> datetime | None:
+    row = store.conn.execute("SELECT value FROM dispatcher_state WHERE key = ?", (key,)).fetchone()
     return datetime.fromisoformat(row["value"]) if row else None
 
 
-def set_last_tick(store: Store, at: datetime) -> None:
+def _set(store: Store, key: str, at: datetime) -> None:
     with store.conn:
-        store.conn.execute("INSERT INTO dispatcher_state (key, value) VALUES ('last_tick', ?)"
-                           " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (_iso(at),))
+        store.conn.execute("INSERT INTO dispatcher_state (key, value) VALUES (?, ?)"
+                           " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, _iso(at)))
+
+
+def get_last_tick(store: Store) -> datetime | None:
+    """When the previous tick FINISHED (Fix 15). A database written before Fix 15
+    only has 'last_tick' (a start time); it is read as the finish time."""
+    return _get(store, "last_tick_finished") or _get(store, "last_tick")
+
+
+def set_last_tick(store: Store, at: datetime, started: datetime | None = None) -> None:
+    """Record a tick that started at ``started`` (default ``at``) and finished at ``at``."""
+    _set(store, "last_tick_started", started or at)
+    _set(store, "last_tick_finished", at)
 
 
 def _scheduled(item: dict) -> datetime | None:
@@ -57,10 +69,15 @@ def _scheduled(item: dict) -> datetime | None:
 
 
 def tick(store: Store, publish_fn: Callable[[int], object], *, now: datetime,
-         notify: Callable[[str], None], tick_s: float = TICK_S) -> TickReport:
+         notify: Callable[[str], None], tick_s: float = TICK_S,
+         clock: Callable[[], datetime] | None = None, slept: bool = False) -> TickReport:
+    """One tick starting at ``now``. Sleep/stop detection uses the gap since the
+    previous tick FINISHED (time spent inside a tick, e.g. a slow publish, never
+    counts); ``slept`` reports a sleep seen by the run loop's wall-vs-monotonic
+    check. ``clock`` gives the finish time (default: the real clock)."""
     report = TickReport(at=_iso(now))
     last = get_last_tick(store)
-    resumed = last is None or (now - last).total_seconds() > WAKE_FACTOR * tick_s
+    resumed = slept or last is None or (now - last).total_seconds() > WAKE_FACTOR * tick_s
     approved = outbox.list_items(store, "approved")
     handled: set[int] = set()
 
@@ -109,7 +126,8 @@ def tick(store: Store, publish_fn: Callable[[int], object], *, now: datetime,
             report.published.append(item["id"])
         else:
             report.not_published.append((item["id"], status))
-    set_last_tick(store, now)
+    finished = (clock or (lambda: datetime.now(timezone.utc)))()
+    set_last_tick(store, max(finished, now), started=now)
     return report
 
 
@@ -117,14 +135,25 @@ def run(store: Store, publish_fn: Callable[[int], object], *, recover_fn: Callab
         notify: Callable[[str], None], once: bool = False, tick_s: float = TICK_S,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep_fn: Callable[[float], None] = time.sleep,
+        monotonic_fn: Callable[[], float] = time.monotonic,
         on_tick: Callable[[TickReport], None] | None = None, max_ticks: int | None = None) -> None:
+    """Tick every ``tick_s``. Across each inter-tick sleep the wall clock is
+    compared with time.monotonic(): on POSIX the monotonic clock stops while the
+    machine sleeps, so a large difference means a sleep even if the stored
+    finish->start gap were misleading. (On Windows the monotonic clock keeps
+    running in sleep; the finish->start gap covers it.)"""
     recover_fn()
     n = 0
+    slept = False
     while True:
-        report = tick(store, publish_fn, now=now_fn(), notify=notify, tick_s=tick_s)
+        report = tick(store, publish_fn, now=now_fn(), notify=notify, tick_s=tick_s, clock=now_fn,
+                      slept=slept)
         if on_tick:
             on_tick(report)
         n += 1
         if once or (max_ticks is not None and n >= max_ticks):
             return
+        wall0, mono0 = now_fn(), monotonic_fn()
         sleep_fn(tick_s)
+        wall_gap = (now_fn() - wall0).total_seconds()
+        slept = wall_gap - (monotonic_fn() - mono0) > WAKE_FACTOR * tick_s

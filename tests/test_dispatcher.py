@@ -107,13 +107,35 @@ def test_state_survives_restart(store, tmp_path):
         assert report.resumed and outbox.get(s, qid)["status"] == "failed"
 
 
+class Clock:
+    """Wall and monotonic time that advance only when the loop sleeps."""
+
+    def __init__(self, start=T0):
+        self.wall, self.mono = start, 1000.0
+
+    def now(self):
+        return self.wall
+
+    def monotonic(self):
+        return self.mono
+
+    def sleep(self, s, *, suspended=0.0):
+        self.wall += timedelta(seconds=s + suspended)
+        self.mono += s  # POSIX: the monotonic clock stops while suspended
+
+
 def test_run_loop_recovers_first_and_sleeps_between_ticks(store):
-    order, sleeps = [], []
-    clock = iter([T0, T0 + timedelta(seconds=30), T0 + timedelta(seconds=60)])
+    order, sleeps, clock = [], [], Clock()
+
+    def sleep(s):
+        sleeps.append(s)
+        clock.sleep(s)
+
     dispatcher.run(store, FakePublisher(store), recover_fn=lambda: order.append("recover"), notify=print,
-                   now_fn=lambda: next(clock), sleep_fn=sleeps.append,
-                   on_tick=lambda r: order.append(r.at), max_ticks=3)
+                   now_fn=clock.now, monotonic_fn=clock.monotonic, sleep_fn=sleep,
+                   on_tick=lambda r: order.append((r.at, r.resumed)), max_ticks=3)
     assert order[0] == "recover" and len(order) == 4
+    assert [resumed for _, resumed in order[1:]] == [True, False, False]  # first tick ever, then normal
     assert sleeps == [30.0, 30.0]
 
 
@@ -136,3 +158,63 @@ def test_dispatch_publishes_through_the_real_publisher(store, compose, tmp_path,
     log = store.conn.execute("SELECT dispatched_at, completed_at FROM dispatch_log WHERE queue_id = ?",
                              (qid,)).fetchone()
     assert log["dispatched_at"] and log["completed_at"]
+
+
+# Fix 15: a slow tick must not look like a sleep.
+
+def test_slow_tick_does_not_mark_the_next_item_missed(store):
+    clock = Clock()
+    dispatcher.set_last_tick(store, T0 - timedelta(seconds=30))
+    a = item(store, T0 - timedelta(seconds=1), policy="skip")
+    b = item(store, T0 + timedelta(seconds=60), policy="skip")  # comes due during the slow tick
+
+    def slow_publish(qid):
+        clock.wall += timedelta(seconds=5 * dispatcher.TICK_S)  # e.g. a relearn: 150 s inside the tick
+        return FakePublisher(store)(qid)
+
+    report = dispatcher.tick(store, slow_publish, now=clock.now(), notify=print, clock=clock.now)
+    assert report.published == [a]
+    assert dispatcher.get_last_tick(store) == T0 + timedelta(seconds=150)  # the finish time
+    clock.sleep(30)
+    report = dispatcher.tick(store, FakePublisher(store), now=clock.now(), notify=print, clock=clock.now)
+    assert not report.resumed and report.missed == [] and report.published == [b]
+
+
+def test_genuine_gap_after_finish_is_resumed(store):
+    clock = Clock()
+    dispatcher.set_last_tick(store, T0, started=T0 - timedelta(seconds=150))
+    qid = item(store, T0 + timedelta(minutes=5), policy="skip")
+    report = dispatcher.tick(store, FakePublisher(store), now=T0 + timedelta(minutes=20), notify=print,
+                             clock=clock.now)
+    assert report.resumed and outbox.get(store, qid)["status"] == "failed"
+
+
+def test_suspend_seen_by_wall_vs_monotonic_clock(store):
+    clock = Clock()
+    pub = FakePublisher(store)
+    seen = []
+    calls = {"n": 0}
+
+    def sleep(s):
+        calls["n"] += 1
+        clock.sleep(s, suspended=3600 if calls["n"] == 1 else 0)
+
+    dispatcher.run(store, pub, recover_fn=lambda: None, notify=print, now_fn=clock.now,
+                   monotonic_fn=clock.monotonic, sleep_fn=sleep, on_tick=lambda r: seen.append(r.resumed),
+                   max_ticks=3)
+    assert seen == [True, True, False]
+
+
+def test_legacy_last_tick_key_is_read_as_finish(store):
+    store.conn.execute("INSERT INTO dispatcher_state (key, value) VALUES ('last_tick', ?)", (T0.isoformat(),))
+    assert dispatcher.get_last_tick(store) == T0
+    assert not dispatcher.tick(store, FakePublisher(store), now=T0 + timedelta(seconds=30), notify=print).resumed
+
+
+def test_slept_flag_alone_marks_resumed(store):
+    dispatcher.set_last_tick(store, T0)
+    normal = dispatcher.tick(store, FakePublisher(store), now=T0 + timedelta(seconds=30), notify=print)
+    assert not normal.resumed
+    flagged = dispatcher.tick(store, FakePublisher(store), now=T0 + timedelta(seconds=60), notify=print,
+                              slept=True)
+    assert flagged.resumed
