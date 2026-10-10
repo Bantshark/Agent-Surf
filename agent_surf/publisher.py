@@ -30,6 +30,7 @@ CONFIRM_TIMEOUT_S = 20.0
 READBACK_TIMEOUT_S = 15.0
 
 OpenPage = Callable[[sites.Site], ActionPage]
+_monotonic = time.monotonic  # module attribute so tests can simulate slow steps
 
 
 class PublishRefused(RuntimeError):
@@ -60,9 +61,10 @@ def _now(now: datetime | None) -> datetime:
 def caps_problem(store: Store, site: str, action: str, limits: dict, now: datetime) -> str | None:
     """Why publishing now would break the map's caps, or None. Every submit
     counts, whatever its outcome."""
+    since = _iso(now - timedelta(days=1))  # only the last 24 h matter (indexed)
     rows = store.conn.execute(
-        "SELECT submitted_at FROM dispatch_log WHERE site = ? AND action = ? AND submitted_at IS NOT NULL",
-        (site, action)).fetchall()
+        "SELECT submitted_at FROM dispatch_log WHERE site = ? AND action = ? AND submitted_at >= ?",
+        (site, action, since)).fetchall()
     times = sorted(datetime.fromisoformat(r["submitted_at"]) for r in rows)
     if times:
         gap = (now - times[-1]).total_seconds()
@@ -358,6 +360,12 @@ def _discard_quietly(sub: Submitter) -> None:
 def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = None, model: str = "",
             maps_dir: Any = None, guard: Any = None, now: datetime | None = None) -> PublishResult:
     now = _now(now)
+    started = _monotonic()
+
+    def submit_moment() -> datetime:
+        """Fix 19: when the submit actually happened (after any relearn), on the
+        same clock as ``now``."""
+        return now + timedelta(seconds=_monotonic() - started)
     item = outbox.get(store, item_id)
     if item["status"] != "approved":
         raise PublishRefused(f"queue item {item_id} is {item['status']}; only approved items are published")
@@ -386,14 +394,14 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
             sub.start()
             sub.run_steps()
             since = sub.submit()
-            logrow.submitted(now)
+            logrow.submitted(submit_moment())
             notes += sub.notes
             break
         except (Refused, sites.DomainRefused) as e:
             _discard_quietly(sub)
             return _finish(store, item_id, "needs_attention", logrow, error=f"refused: {e}", notes=sub.notes)
         except SubmitUnknown as e:
-            logrow.submitted(now)
+            logrow.submitted(submit_moment())
             return resolve_unknown(store, open_page, item, amap, logrow, str(e))
         except StepFailed as e:
             _discard_quietly(sub)

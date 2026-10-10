@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS dispatch_log (
     completed_at TEXT,
     outcome TEXT
 );
+CREATE INDEX IF NOT EXISTS dispatch_log_caps ON dispatch_log (site, action, submitted_at);
 -- v2: dispatcher state (last tick), so wake/restart detection survives restarts
 CREATE TABLE IF NOT EXISTS dispatcher_state (
     key TEXT PRIMARY KEY,
