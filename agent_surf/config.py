@@ -27,6 +27,7 @@ class Config:
     model: str
     attach: str = "cdp"                 # AGENT_SURF_ATTACH
     profile_dir: Path | None = None     # AGENT_SURF_PROFILE_DIR (devtools-active-port mode)
+    allow_remote_cdp: bool = False      # AGENT_SURF_ALLOW_REMOTE_CDP=1: allow a non-loopback CDP host
 
     @property
     def db_path(self) -> Path:
@@ -56,6 +57,7 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         model=e.get("AGENT_SURF_MODEL") or DEFAULT_MODEL,
         attach=e.get("AGENT_SURF_ATTACH") or "cdp",
         profile_dir=Path(e["AGENT_SURF_PROFILE_DIR"]).expanduser() if e.get("AGENT_SURF_PROFILE_DIR") else None,
+        allow_remote_cdp=e.get("AGENT_SURF_ALLOW_REMOTE_CDP") == "1",
     )
 
 

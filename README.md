@@ -70,6 +70,7 @@ Environment:
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | | CAPTCHA and missed-schedule pings; otherwise stderr |
 | `AGENT_SURF_ATTACH` | `cdp` | `devtools-active-port` (experimental, see below) |
 | `AGENT_SURF_PROFILE_DIR` | | Chrome profile dir for `devtools-active-port` |
+| `AGENT_SURF_ALLOW_REMOTE_CDP` | | `1` allows a non-loopback CDP endpoint (off by default) |
 
 ## v2: publishing
 
@@ -126,6 +127,33 @@ a Telegram ping).
 for the post on your account through the reading side (the action map's
 `lookup` page, which needs a reading map) and records the receipt if found.
 It never submits the same item twice on its own.
+
+### Data on this machine
+
+Everything lives under `$AGENT_SURF_HOME` (default `~/.agent-surf`), **unencrypted**
+(encryption at rest would need a dependency; see BUILD-BRIEF). Protect it like
+your browser profile.
+
+| Path | What | Kept until |
+|---|---|---|
+| `surf.db` | reading/action map versions, seen ids, stored reading items, the queue (your drafts and approved text), receipts, dispatch log, dispatcher state | items: `purge`; everything else: until you delete it |
+| `maps/` | learned reading and action maps (selectors, no content) | relearn / delete |
+| `media/<id>/` | approved media snapshots (0700/0600 on POSIX) | removed when the item is published or rejected |
+| `debug/` | learn-action evidence (map, error, notes, page snapshots that can include other people's posts) | newest 20 kept automatically; `purge` |
+| `chrome-profile/` | the dedicated Chrome profile (cookies, logins) if you use `agent-surf chrome` | Chrome |
+
+```
+python -m agent_surf purge [--items-older-than 90] [--debug-older-than 14] [--dry-run]
+```
+
+`purge` deletes stored reading items and debug folders older than the
+thresholds. It never deletes maps, the queue, receipts or seen ids (without
+seen ids old posts would come back as new). `learn`, `learn-action` and `inbox`
+also keep only the newest 20 debug folders.
+
+The CDP endpoint must be loopback (`127.0.0.1`, `::1`, `localhost`): the
+debugging port gives full control of the profile. Set
+`AGENT_SURF_ALLOW_REMOTE_CDP=1` only if you really attach to another machine.
 
 ### Attach modes
 

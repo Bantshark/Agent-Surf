@@ -335,15 +335,30 @@ def read_devtools_active_port(profile_dir: str | Path) -> str:
     return f"ws://127.0.0.1:{port}{lines[1]}"
 
 
+LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def check_loopback(endpoint: str, allow_remote: bool = False) -> str:
+    """Fix 14: CDP gives full control of the browser profile, so only a loopback
+    endpoint is used unless AGENT_SURF_ALLOW_REMOTE_CDP=1."""
+    host = (urlsplit(endpoint).hostname or "").lower()
+    if host not in LOOPBACK_HOSTS and not allow_remote:
+        raise BrowserError(f"refusing CDP endpoint on {host or endpoint!r}: only 127.0.0.1, ::1 or localhost "
+                           "are allowed (set AGENT_SURF_ALLOW_REMOTE_CDP=1 to override)")
+    return endpoint
+
+
 def cdp_endpoint(cfg: Any) -> str:
     """Where to attach: AGENT_SURF_CDP_URL (default mode ``cdp``) or, in the
-    experimental ``devtools-active-port`` mode, the profile's DevToolsActivePort."""
+    experimental ``devtools-active-port`` mode, the profile's DevToolsActivePort.
+    Loopback hosts only (both modes) unless AGENT_SURF_ALLOW_REMOTE_CDP=1."""
+    allow = getattr(cfg, "allow_remote_cdp", False)
     if cfg.attach == "cdp":
-        return cfg.cdp_url
+        return check_loopback(cfg.cdp_url, allow)
     if cfg.attach == "devtools-active-port":
         if cfg.profile_dir is None:
             raise BrowserError("AGENT_SURF_ATTACH=devtools-active-port needs AGENT_SURF_PROFILE_DIR")
-        return read_devtools_active_port(cfg.profile_dir)
+        return check_loopback(read_devtools_active_port(cfg.profile_dir), allow)
     raise BrowserError(f"unknown AGENT_SURF_ATTACH {cfg.attach!r}; use cdp or devtools-active-port")
 
 
@@ -358,7 +373,8 @@ class BrowserSession:
     or closed."""
 
     def __init__(self, cdp_url: str):
-        self.cdp_url = cdp_url
+        import os
+        self.cdp_url = check_loopback(cdp_url, os.environ.get("AGENT_SURF_ALLOW_REMOTE_CDP") == "1")
         self._pw = None
         self._tabs: list[Any] = []
 

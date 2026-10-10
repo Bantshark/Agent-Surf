@@ -109,6 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
     ib.add_argument("site")
     ib.add_argument("page_type")
     sub.add_parser("receipts", help="published items and their receipts")
+
+    pg = sub.add_parser("purge", help="delete old stored items and debug folders (maps, queue, "
+                                      "receipts and seen ids are kept)")
+    pg.add_argument("--items-older-than", type=int, default=90, metavar="DAYS")
+    pg.add_argument("--debug-older-than", type=int, default=14, metavar="DAYS")
+    pg.add_argument("--dry-run", action="store_true")
     return p
 
 
@@ -151,6 +157,7 @@ def cmd_chrome(cfg: config.Config, args: argparse.Namespace) -> int:
 def cmd_learn(cfg: config.Config, args: argparse.Namespace) -> int:
     from agent_surf import learner
 
+    prune_debug(cfg)
     site = sites.get_site(args.site)
     sites.build_url(args.site, args.page_type, query=args.query, handle=args.handle)
     client = make_client(cfg)
@@ -253,6 +260,7 @@ def cmd_learn_action(cfg: config.Config, args: argparse.Namespace) -> int:
     from agent_surf import action_learner
     from agent_surf.executor import ActionPage
 
+    prune_debug(cfg)
     site = sites.get_site(args.site)
     client = make_client(cfg)
     if client is None:
@@ -365,6 +373,7 @@ def outbox_has(store: Store, status: str) -> bool:
 def cmd_inbox(cfg: config.Config, args: argparse.Namespace) -> int:
     from agent_surf import inbox, runner
 
+    prune_debug(cfg)
     site = sites.get_site(args.site)
     if args.page_type not in sites.INBOX_PAGE_TYPES.get(args.site, set()):
         log.error("%s %s is not an inbox page; inbox pages: %s", args.site, args.page_type,
@@ -396,10 +405,30 @@ def cmd_receipts(cfg: config.Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_purge(cfg: config.Config, args: argparse.Namespace) -> int:
+    from agent_surf import retention
+
+    with Store(cfg.db_path) as store:
+        items = retention.purge_items(store, args.items_older_than, dry_run=args.dry_run)
+    debug = retention.purge_debug(cfg.home / "debug", args.debug_older_than, dry_run=args.dry_run)
+    verb = "would delete" if args.dry_run else "deleted"
+    log.info("%s %d stored item(s) older than %d days and %d debug folder(s) older than %d days",
+             verb, items, args.items_older_than, len(debug), args.debug_older_than)
+    emit(args, {"dry_run": args.dry_run, "items": items, "debug_folders": [str(p) for p in debug]})
+    return EXIT_OK
+
+
+def prune_debug(cfg: config.Config) -> None:
+    from agent_surf import retention
+
+    for p in retention.prune_debug(cfg.home / "debug"):
+        log.info("pruned old debug folder %s", p.name)
+
+
 COMMANDS = {"chrome": cmd_chrome, "learn": cmd_learn, "run": cmd_run, "maps": cmd_maps,
             "youtube": cmd_youtube, "scrub": cmd_scrub, "learn-action": cmd_learn_action,
             "queue": cmd_queue, "publish": cmd_publish, "dispatch": cmd_dispatch, "inbox": cmd_inbox,
-            "receipts": cmd_receipts}
+            "receipts": cmd_receipts, "purge": cmd_purge}
 
 
 def main(argv: list[str] | None = None) -> int:
