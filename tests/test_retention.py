@@ -16,7 +16,7 @@ NOW = datetime(2026, 10, 10, tzinfo=timezone.utc)
 
 
 def add_item(store, item_id, days_ago):
-    store.conn.execute("INSERT INTO items VALUES ('x', 'search', ?, '{}', ?)",
+    store.conn.execute("INSERT INTO items (site, page_type, item_id, data_json, captured_at) VALUES ('x', 'search', ?, '{}', ?)",
                        (item_id, (NOW - timedelta(days=days_ago)).isoformat(timespec="seconds")))
     store.mark_seen("x", "search", item_id)
 

@@ -110,6 +110,17 @@ def build_parser() -> argparse.ArgumentParser:
     ib.add_argument("page_type")
     sub.add_parser("receipts", help="published items and their receipts")
 
+    it = sub.add_parser("items", help="stored reading items again (e.g. ones never printed)")
+    it.add_argument("--site")
+    it.add_argument("--page-type")
+    itg = it.add_mutually_exclusive_group()
+    itg.add_argument("--run", metavar="RUN_ID", help="items stored by one run (run_id= on stderr)")
+    itg.add_argument("--since", type=_since, metavar="ISO8601", help="items captured at or after")
+    itg.add_argument("--undelivered", action="store_true",
+                     help="items stored but never printed (stdout failed)")
+    it.add_argument("--mark-delivered", action="store_true",
+                    help="mark the printed items delivered once stdout is flushed")
+
     acct = sub.add_parser("account", help="your own handle per site (for checking unknown outcomes)")
     asub = acct.add_subparsers(dest="account_command", required=True)
     aset = asub.add_parser("set", parents=[common])
@@ -136,6 +147,19 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _since(value: str) -> str:
+    """ISO 8601 to the store's UTC format; a naive time is taken as UTC."""
+    from datetime import datetime, timezone
+
+    try:
+        t = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an ISO 8601 time: {value!r}") from None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return t.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
 def print_items(items: list[dict], as_json: bool) -> None:
     if as_json:
         print(json.dumps(items, ensure_ascii=False, indent=1))
@@ -145,6 +169,53 @@ def print_items(items: list[dict], as_json: bool) -> None:
         summary = " | ".join(f"{k}: {str(v)[:120]}" for k, v in fields.items()
                              if v is not None and k not in ("subtitles", "comments", "description"))
         print(f"{item['item_id']}\t{summary}")
+
+
+def start_run(store: Store) -> str:
+    """Give this invocation a run_id: stamped on every item it stores, printed to stderr."""
+    from agent_surf.store import new_run_id
+
+    store.run_id = new_run_id()
+    print(f"run_id={store.run_id}", file=sys.stderr, flush=True)
+    return store.run_id
+
+
+def _undelivered_hint(store: Store, run_id: str) -> None:
+    n = len(store.select_items(run_id=run_id, undelivered=True))
+    if n:
+        log.error("%d item(s) from run_id=%s were stored and marked seen but not printed; "
+                  "get them with: agent-surf items --run %s (or --undelivered)", n, run_id, run_id)
+
+
+def deliver(store: Store, items: list[dict], as_json: bool, *, run_id: str | None = None,
+            rowids: list[int] | None = None) -> int:
+    """Print items, flush stdout, and only then mark them delivered. If stdout
+    fails they stay undelivered and `items --undelivered` brings them back."""
+    try:
+        print_items(items, as_json)
+        sys.stdout.flush()
+    except (OSError, ValueError) as e:   # broken pipe, closed or full stdout
+        log.error("could not write to stdout: %s", e)
+        if run_id is not None:
+            _undelivered_hint(store, run_id)
+        return EXIT_ERROR
+    store.mark_delivered(run_id=run_id, rowids=rowids)
+    return EXIT_OK
+
+
+class _RunScope:
+    """On any failure after items were stored, say how to recover them."""
+
+    def __init__(self, store: Store):
+        self.store = store
+        self.run_id = start_run(store)
+
+    def __enter__(self) -> str:
+        return self.run_id
+
+    def __exit__(self, exc_type: Any, *a: Any) -> None:
+        if exc_type is not None:
+            _undelivered_hint(self.store, self.run_id)
 
 
 def make_client(cfg: config.Config) -> Any:
@@ -199,19 +270,20 @@ def cmd_run(cfg: config.Config, args: argparse.Namespace) -> int:
     with Store(cfg.db_path) as store:
         runner.load_current_map(store, args.site, args.page_type)  # refuse before touching Chrome
         client = make_client(cfg)
-        with BrowserSession(cdp_endpoint(cfg)) as session:
-            try:
-                result = learner.run_with_heal(
-                    store, session.new_page(site), args.site, args.page_type, client=client,
-                    model=cfg.model, maps_dir=cfg.maps_dir, query=args.query, handle=args.handle,
-                    guard=challenge.make_guard())
-            except runner.MapBroken as e:
-                log.error("map broken: %s. Set ANTHROPIC_API_KEY to self-heal, or run "
-                          "agent-surf learn %s %s", e.reason, args.site, args.page_type)
-                return EXIT_MAP_BROKEN
-    print_items(result.items, args.json)
+        with _RunScope(store) as run_id:
+            with BrowserSession(cdp_endpoint(cfg)) as session:
+                try:
+                    result = learner.run_with_heal(
+                        store, session.new_page(site), args.site, args.page_type, client=client,
+                        model=cfg.model, maps_dir=cfg.maps_dir, query=args.query, handle=args.handle,
+                        guard=challenge.make_guard())
+                except runner.MapBroken as e:
+                    log.error("map broken: %s. Set ANTHROPIC_API_KEY to self-heal, or run "
+                              "agent-surf learn %s %s", e.reason, args.site, args.page_type)
+                    return EXIT_MAP_BROKEN
+            code = deliver(store, result.items, args.json, run_id=run_id)
     log.info("%d new item(s)", len(result.items))
-    return EXIT_OK
+    return code
 
 
 def cmd_maps(cfg: config.Config, args: argparse.Namespace) -> int:
@@ -234,11 +306,11 @@ def cmd_maps(cfg: config.Config, args: argparse.Namespace) -> int:
 def cmd_youtube(cfg: config.Config, args: argparse.Namespace) -> int:
     from agent_surf import youtube
 
-    with Store(cfg.db_path) as store:
+    with Store(cfg.db_path) as store, _RunScope(store) as run_id:
         items = youtube.run_youtube(store, args.target, subs=args.subs, comments=args.comments)
-    print_items(items, args.json)
+        code = deliver(store, items, args.json, run_id=run_id)
     log.info("%d new video(s)", len(items))
-    return EXIT_OK
+    return code
 
 
 def cmd_scrub(cfg: config.Config, args: argparse.Namespace) -> int:
@@ -399,17 +471,38 @@ def cmd_inbox(cfg: config.Config, args: argparse.Namespace) -> int:
         return EXIT_ERROR
     with Store(cfg.db_path) as store:
         runner.load_current_map(store, args.site, args.page_type)
-        with BrowserSession(cdp_endpoint(cfg)) as session:
-            try:
-                result = inbox.run_inbox(store, session.new_page(site), args.site, args.page_type,
-                                         client=make_client(cfg), model=cfg.model, maps_dir=cfg.maps_dir,
-                                         guard=challenge.make_guard())
-            except runner.MapBroken as e:
-                log.error("map broken: %s", e.reason)
-                return EXIT_MAP_BROKEN
-    print_items(result.items, args.json)
+        with _RunScope(store) as run_id:
+            with BrowserSession(cdp_endpoint(cfg)) as session:
+                try:
+                    result = inbox.run_inbox(store, session.new_page(site), args.site, args.page_type,
+                                             client=make_client(cfg), model=cfg.model,
+                                             maps_dir=cfg.maps_dir, guard=challenge.make_guard())
+                except runner.MapBroken as e:
+                    log.error("map broken: %s", e.reason)
+                    return EXIT_MAP_BROKEN
+            code = deliver(store, result.items, args.json, run_id=run_id)
     log.info("%d new item(s)", len(result.items))
-    return EXIT_OK
+    return code
+
+
+def cmd_items(cfg: config.Config, args: argparse.Namespace) -> int:
+    """Stored items in the same shape `run` prints (a plain JSON array with --json)."""
+    with Store(cfg.db_path) as store:
+        rows = store.select_items(site=args.site, page_type=args.page_type, run_id=args.run,
+                                  since=args.since, undelivered=args.undelivered)
+        items = [json.loads(r["data_json"]) for r in rows]
+        if args.mark_delivered:
+            code = deliver(store, items, args.json, rowids=[r["rowid"] for r in rows])
+        else:
+            try:
+                print_items(items, args.json)
+                sys.stdout.flush()
+            except (OSError, ValueError) as e:
+                log.error("could not write to stdout: %s", e)
+                return EXIT_ERROR
+            code = EXIT_OK
+    log.info("%d item(s)%s", len(items), " marked delivered" if args.mark_delivered and not code else "")
+    return code
 
 
 def cmd_receipts(cfg: config.Config, args: argparse.Namespace) -> int:
@@ -485,7 +578,7 @@ def prune_debug(cfg: config.Config) -> None:
 COMMANDS = {"chrome": cmd_chrome, "learn": cmd_learn, "run": cmd_run, "maps": cmd_maps,
             "youtube": cmd_youtube, "scrub": cmd_scrub, "learn-action": cmd_learn_action,
             "queue": cmd_queue, "publish": cmd_publish, "dispatch": cmd_dispatch, "inbox": cmd_inbox,
-            "receipts": cmd_receipts, "purge": cmd_purge, "account": cmd_account, "actions": cmd_actions}
+            "receipts": cmd_receipts, "items": cmd_items, "purge": cmd_purge, "account": cmd_account, "actions": cmd_actions}
 
 
 def main(argv: list[str] | None = None) -> int:
