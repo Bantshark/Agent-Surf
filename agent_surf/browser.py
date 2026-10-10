@@ -147,8 +147,48 @@ _DOM_EXTRACT_JS = """([itemSel, idAttr, fields]) => {
 }"""
 
 
+# Fix 25: an element's accessible name, in order: aria-labelledby (the
+# referenced elements' text, joined), aria-label, <label>s / alt / title,
+# innerText, value (then descendant img alt, textContent). A text field is
+# named by its labels, title or placeholder, never by what was typed into it.
+# Returns the name and every non-empty source, so a denylist can check them
+# all. Pure read.
+ACCESSIBLE_NAME_FN = r"""function (e) {
+  const t = s => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+  const sources = [];
+  const add = s => { s = t(s); if (s) sources.push(s); return s; };
+  let name = '';
+  const ids = t(e.getAttribute('aria-labelledby')).split(' ').filter(Boolean);
+  if (ids.length) {
+    const root = e.getRootNode();
+    const doc = e.ownerDocument;
+    name = add(ids.map(id => {
+      const r = (root && root.getElementById ? root.getElementById(id) : null) || doc.getElementById(id);
+      return r ? t(r.getAttribute('aria-label') || r.innerText || r.textContent) : '';
+    }).filter(Boolean).join(' '));
+  }
+  const aria = add(e.getAttribute('aria-label'));
+  const labels = add(e.labels ? Array.from(e.labels).map(l => t(l.innerText || l.textContent)).join(' ') : '');
+  const alt = add(e.getAttribute('alt'));
+  const title = add(e.getAttribute('title'));
+  const tag = e.tagName.toLowerCase();
+  const field = e.isContentEditable || tag === 'textarea' || e.getAttribute('role') === 'textbox' ||
+    (tag === 'input' && !['button', 'submit', 'reset', 'image'].includes((e.type || '').toLowerCase()));
+  if (field) {
+    name = name || aria || labels || alt || title || add(e.getAttribute('placeholder'));
+    return {name: name.slice(0, 200), sources: sources.map(s => s.slice(0, 200))};
+  }
+  const inner = add(e.innerText);
+  const value = add(typeof e.value === 'string' ? e.value : '');
+  const imgs = add(Array.from(e.querySelectorAll('img[alt]')).map(i => i.getAttribute('alt')).join(' '));
+  const text = add(e.textContent);
+  name = name || aria || labels || alt || title || inner || value || imgs || text;
+  return {name: name.slice(0, 200), sources: sources.map(s => s.slice(0, 200))};
+}"""
+
 # Facts about elements matching a stored click selector. Pure read.
 _CLICK_CANDIDATES_JS = """([sel, limit]) => {
+  const accName = """ + ACCESSIBLE_NAME_FN + """;
   let nodes;
   try { nodes = document.querySelectorAll(sel); } catch (e) { return []; }
   const out = [];
@@ -158,12 +198,14 @@ _CLICK_CANDIDATES_JS = """([sel, limit]) => {
     const cs = getComputedStyle(el);
     const tag = el.tagName.toLowerCase();
     const link = el.closest('a[href]');
+    const acc = accName(el);
     out.push({
       index: i,
       tag: tag,
       type: (el.getAttribute('type') || '').toLowerCase(),
       text: (el.innerText || '').trim().slice(0, 200),
-      label: (el.getAttribute('aria-label') || '').trim().slice(0, 200),
+      label: acc.name,
+      names: acc.sources,
       href: link ? link.getAttribute('href') : null,
       inForm: !!el.closest('form'),
       inDialog: !!el.closest('dialog,[role=dialog],[role=alertdialog],[aria-modal=true]'),
@@ -198,9 +240,10 @@ def safe_to_click(c: dict) -> bool:
             ("#", "javascript:void")):
         return False  # real links navigate; v1 never follows them by clicking
     names = [n for n in (c.get("text") or "", c.get("label") or "") if n]
-    if not names or any(len(n) > MAX_CLICK_TEXT for n in names):
+    every = names + [n for n in c.get("names") or [] if n]   # Fix 25: every name source
+    if not names or any(len(n) > MAX_CLICK_TEXT for n in every):
         return False
-    if any(CLICK_DENY.search(n) for n in names):
+    if any(CLICK_DENY.search(n) for n in every):
         return False
     return any(CLICK_ALLOW.search(n) for n in names)
 

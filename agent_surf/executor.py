@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 from agent_surf import actionmap, challenge, sitemap, sites
 from agent_surf.actionmap import PRESS_KEYS, SUBMIT_LABELS, Resolved, candidates, try_resolve
-from agent_surf.browser import ReadOnlyPage
+from agent_surf.browser import ACCESSIBLE_NAME_FN, ReadOnlyPage
 
 log = logging.getLogger("agent_surf.executor")
 
@@ -111,13 +111,18 @@ def _contains(container: Any, el: Any) -> bool:
         return False
 
 
-def _label(loc: Any) -> str:
+def accessible_name(loc: Any) -> tuple[str, list[str]]:
+    """Fix 25: (name, every non-empty name source). The name follows
+    aria-labelledby, aria-label, labels/alt/title, innerText, value."""
     try:
-        return (loc.evaluate(
-            "e => (e.getAttribute('aria-label') || e.innerText || e.value || e.textContent || '')")
-            or "").strip()
+        r = loc.evaluate("e => (" + ACCESSIBLE_NAME_FN + ")(e)") or {}
     except Exception:
-        return ""
+        return "", []
+    return (r.get("name") or "").strip(), [s for s in r.get("sources") or [] if s]
+
+
+def _label(loc: Any) -> str:
+    return accessible_name(loc)[0]
 
 
 class StepRunner:
@@ -265,12 +270,15 @@ class StepRunner:
         return try_resolve(self.raw, target) is None
 
     def _check_click_allowed(self, loc: Any, where: Any, allowlist: tuple) -> None:
-        label = _label(loc)
-        if DESTRUCTIVE.search(label):
-            raise Refused(f"step {where}: refusing to click {label!r} (destructive control)")
-        if self.composing and label.lower() in SUBMIT_WORDS:
-            raise Refused(f"step {where}: refusing to click {label!r} outside submit "
-                          "(it could publish)")
+        label, sources = accessible_name(loc)
+        # Denylists see every name source (a "Close"-labelled "Delete" is still Delete).
+        for name in [label] + sources:
+            if DESTRUCTIVE.search(name):
+                raise Refused(f"step {where}: refusing to click {name!r} (destructive control)")
+        for name in [label] + sources:
+            if self.composing and name.lower() in SUBMIT_WORDS:
+                raise Refused(f"step {where}: refusing to click {name!r} outside submit "
+                              "(it could publish)")
         if not label.strip():
             raise Refused(f"step {where}: refusing to click a control with no accessible name")
         if not actionmap.click_allowed(label, allowlist):
@@ -481,7 +489,10 @@ class StepRunner:
     def _checked_submit(self) -> tuple[Resolved, str]:
         sub = self.map["submit"]
         r = self._resolve(sub["target"], "submit", scope="composer")
-        label = _label(r.locator)
+        label, sources = accessible_name(r.locator)
+        for name in [label] + sources:
+            if DESTRUCTIVE.search(name):
+                raise Refused(f"submit: refusing to click {name!r} (destructive control)")
         allowed = set(sub.get("label_allowlist") or ()) & set(SUBMIT_LABELS.get(self.map["action"], ()))
         if label not in allowed:
             raise Refused(f"submit label {label!r} is not in the allowlist {sorted(allowed)}")

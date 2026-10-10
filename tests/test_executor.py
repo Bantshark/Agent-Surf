@@ -185,7 +185,7 @@ def test_submit_label_not_in_allowlist_refused(compose, path, submit):
     run = Submitter(page, mapped(path, submit=submit), {"text": TEXT})
     run.start()
     run.run_steps()
-    with pytest.raises(Refused, match="allowlist"):
+    with pytest.raises(Refused, match="allowlist|destructive"):   # Fix 25: Delete is refused as destructive first
         run.submit()
     assert backend.create_calls == 0
     assert page.raw.evaluate("window.__deleted") is None
