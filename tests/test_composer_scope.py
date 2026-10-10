@@ -99,7 +99,8 @@ def test_missing_container_fails_the_type_step_and_types_nothing(compose):
     m["composer"] = {"target": {"role": "dialog", "name": "Not this one"}}
     run = StepRunner(page, m, {"text": TEXT})
     run.start()
-    with pytest.raises(StepFailed, match="step 2: composer container not found"):
+    # Fix 10: the click before the type step is composer-scoped too, so it stops there.
+    with pytest.raises(StepFailed, match="step 1: composer container not found"):
         run.run_steps()
     assert page.raw.locator("#editor").inner_text() == "" and page.raw.locator("#inline").inner_text() == ""
 

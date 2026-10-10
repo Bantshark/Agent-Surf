@@ -26,6 +26,31 @@ SUBMIT_LABELS = {
     "dm": ("Send",),
     "comment": ("Comment", "Post", "Reply"),
 }
+# Fix 10: labels (accessible names) a map may click, checked in code before
+# every click. Steps: controls that open, focus or expand the composer or attach
+# media. Discard/dismiss steps (which may act outside the composer, e.g. on a
+# "Discard post?" confirm): controls that close things without publishing.
+# Compared case-insensitively with whitespace collapsed. "Delete" stays
+# forbidden (executor.DESTRUCTIVE applies everywhere); "More options" is not
+# allowed.
+COMPOSER_CLICK_LABELS = (
+    "Post text", "Add photos or video", "Add photo", "Add media", "Photo/video", "Media", "Image",
+    "Start a post", "Create post", "Create", "New post", "Write a comment", "Add a comment",
+    "Reply", "Comment", "Message", "Write a message", "Show more",
+)
+CLICK_LABELS = {action: COMPOSER_CLICK_LABELS for action in ("post", "reply", "comment", "dm")}
+DISCARD_CLICK_LABELS = ("Discard", "Discard post", "Don't save", "Close", "Cancel", "Not now", "Dismiss",
+                        "Got it", "OK")
+
+
+def norm_label(label: str) -> str:
+    return re.sub(r"\s+", " ", (label or "").replace("\u2019", "'")).strip().casefold()
+
+
+def click_allowed(label: str, allowlist: tuple) -> bool:
+    return bool(norm_label(label)) and norm_label(label) in {norm_label(a) for a in allowlist}
+
+
 ALLOWED_KEYS = {"site", "action", "version", "start", "steps", "submit", "discard", "dismiss",
                 "confirm", "permalink_template", "limits", "lookup", "learned_at", "learned_by",
                 "composer"}
@@ -183,6 +208,14 @@ def validate_action_map(m: Any) -> list[str]:
         _check_steps(m["discard"], "discard", DISCARD_OPS, problems, set())
     if "dismiss" in m:
         _check_steps(m["dismiss"], "dismiss", ("click", "press"), problems, set())
+    for block, allow in (("steps", CLICK_LABELS.get(action, COMPOSER_CLICK_LABELS)),
+                         ("discard", DISCARD_CLICK_LABELS), ("dismiss", DISCARD_CLICK_LABELS)):
+        for i, step in enumerate(m.get(block) or []):
+            if not isinstance(step, dict) or step.get("op") not in ("click", "attach"):
+                continue
+            name = (step.get("target") or {}).get("name") if isinstance(step.get("target"), dict) else None
+            if isinstance(name, str) and not click_allowed(name, allow):
+                problems.append(f"{block}[{i}]: may not click {name!r} (allowed: {', '.join(allow)})")
     for need in sorted(needs - {"media"} - set(requires)):
         problems.append(f"start.requires: must include {need} (used by the map)")
     if site is not None and action in ACTIONS and isinstance(m.get("steps"), list):

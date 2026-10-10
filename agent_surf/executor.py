@@ -256,13 +256,20 @@ class StepRunner:
         target = self._text_target() or self.map["submit"]["target"]
         return try_resolve(self.raw, target) is None
 
-    def _check_click_allowed(self, loc: Any, where: Any) -> None:
+    def _check_click_allowed(self, loc: Any, where: Any, allowlist: tuple) -> None:
         label = _label(loc)
         if DESTRUCTIVE.search(label):
             raise Refused(f"step {where}: refusing to click {label!r} (destructive control)")
         if self.composing and label.lower() in SUBMIT_WORDS:
             raise Refused(f"step {where}: refusing to click {label!r} outside submit "
                           "(it could publish)")
+        if not label.strip():
+            raise Refused(f"step {where}: refusing to click a control with no accessible name")
+        if not actionmap.click_allowed(label, allowlist):
+            raise Refused(f"step {where}: refusing to click {label!r} (not in the click allowlist)")
+
+    def _step_labels(self) -> tuple:
+        return actionmap.CLICK_LABELS.get(self.map.get("action"), actionmap.COMPOSER_CLICK_LABELS)
 
     def _dismiss_overlay(self, where: Any) -> None:
         dismiss = self.map.get("dismiss")
@@ -273,14 +280,19 @@ class StepRunner:
                 else:
                     r = try_resolve(self.raw, step["target"])
                     if r is not None:
-                        self._check_click_allowed(r.locator, f"dismiss[{i}]")
+                        self._check_click_allowed(r.locator, f"dismiss[{i}]", actionmap.DISCARD_CLICK_LABELS)
                         r.locator.click(timeout=CLICK_TIMEOUT_MS)
         else:
             self.raw.keyboard.press("Escape")
 
-    def _click(self, target: dict, where: Any) -> None:
-        r = self._resolve(target, where)
-        self._check_click_allowed(r.locator, where)
+    def _click(self, target: dict, where: Any, *, discard: bool = False) -> None:
+        """Steps: inside the composer when the map has one (never page-wide),
+        composer labels only. Discard/dismiss: page-wide allowed (confirm
+        dialogs sit outside the composer), discard labels only."""
+        scope = "auto" if discard else "composer"
+        labels = actionmap.DISCARD_CLICK_LABELS if discard else self._step_labels()
+        r = self._resolve(target, where, scope=scope)
+        self._check_click_allowed(r.locator, where, labels)
         try:
             r.locator.click(timeout=CLICK_TIMEOUT_MS)
             return
@@ -292,8 +304,8 @@ class StepRunner:
             self.notes.append(f"step {where}: click intercepted by "
                               f"{cover.group(1) if cover else 'an overlay'}; dismissed and retried")
         self._dismiss_overlay(where)
-        r = self._resolve(target, where)
-        self._check_click_allowed(r.locator, where)
+        r = self._resolve(target, where, scope=scope)
+        self._check_click_allowed(r.locator, where, labels)
         try:
             r.locator.click(timeout=CLICK_TIMEOUT_MS)
         except Exception as e:
@@ -369,7 +381,7 @@ class StepRunner:
             if is_input:
                 r.locator.set_input_files(files)
             else:
-                self._check_click_allowed(r.locator, where)
+                self._check_click_allowed(r.locator, where, self._step_labels())
                 with self.raw.expect_file_chooser(timeout=self.step_timeout_s * 1000) as chooser:
                     r.locator.click(timeout=CLICK_TIMEOUT_MS)
                 chooser.value.set_files(files)
@@ -414,7 +426,7 @@ class StepRunner:
         if op == "navigate":
             self._navigate(step, where)
         elif op == "click":
-            self._click(step["target"], where)
+            self._click(step["target"], where, discard=allowed == actionmap.DISCARD_OPS)
         elif op == "type":
             if step.get("value") != "{text}":
                 raise Refused(f"step {where}: type only takes the queue item's text")

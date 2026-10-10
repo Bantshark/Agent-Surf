@@ -71,7 +71,7 @@ def test_model_text_never_reaches_the_composer(store, compose, tmp_path, monkeyp
     (lambda m: m["steps"][1].update(value="buy now"), "invalid"),                       # model text
     (lambda m: m["submit"].update(label_allowlist=["Delete"]), "invalid"),
     (lambda m: m["steps"].insert(0, {"op": "click", "target": {"role": "button", "name": "Delete"}}),
-     "destructive"),
+     "may not click 'Delete'"),                                                   # Fix 10: validator
     (lambda m: m["steps"].append({"op": "press", "value": "Enter"}), "could publish"),
 ])
 def test_injected_model_output_is_refused(store, compose, tmp_path, bad, match):

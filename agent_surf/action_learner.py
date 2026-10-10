@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from agent_surf import actionmap, learner, runner, sitemap, sites
-from agent_surf.actionmap import ActionMapError, SUBMIT_LABELS
+from agent_surf.actionmap import (ActionMapError, COMPOSER_CLICK_LABELS, DISCARD_CLICK_LABELS,
+                                  SUBMIT_LABELS)
 from agent_surf.executor import ActionPage, Refused, StepFailed, StepRunner
 from agent_surf.store import Store, now_iso
 
@@ -74,6 +75,13 @@ Reply with exactly one JSON object and nothing else, with these keys:
 A target is {{"role", "name", "testid", "css"}} (any of them; role+name preferred).
 Never target like/follow/delete/report/block controls. JSON paths use dot keys,
 [N] and [*].
+Clicks are checked in code against these labels (accessible names) and anything else
+is refused: in "steps" only {", ".join(repr(x) for x in COMPOSER_CLICK_LABELS)}, and
+only inside the composer container (never the page behind it); in "discard" and
+"dismiss" only {", ".join(repr(x) for x in DISCARD_CLICK_LABELS)}, which may sit
+outside the composer (e.g. a "Discard post?" confirm). Do not click audience/reply
+settings, scheduling, emoji/GIF/poll pickers, "More options" or anything on the page
+behind the composer.
 """
 
 
