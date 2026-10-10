@@ -146,6 +146,9 @@ def build_parser() -> argparse.ArgumentParser:
     slg.add_argument("--handle")
     slg.add_argument("--query")
 
+    sub.add_parser("doctor", help="check packages, browser, login, maps, keys and queue "
+                                  "(no model calls, no publishing)")
+
     key = sub.add_parser("key", help="store the Anthropic API key in the Windows Credential Manager")
     ksub = key.add_subparsers(dest="key_command", required=True)
     ksub.add_parser("set", parents=[common], help="prompt for the key (hidden) and store it")
@@ -593,6 +596,16 @@ def cmd_actions(cfg: config.Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_doctor(cfg: config.Config, args: argparse.Namespace) -> int:
+    """Fix 28. Exit 0 when every required check passed, else 1."""
+    from agent_surf import doctor
+
+    with Store(cfg.db_path) as store:
+        report = doctor.run_doctor(cfg, store, open_session=BrowserSession)
+    emit(args, report, doctor.format_text(report))
+    return EXIT_OK if report["ok"] else EXIT_ERROR
+
+
 def cmd_key(cfg: config.Config, args: argparse.Namespace) -> int:
     """Fix 27. The value is read with getpass and never printed or logged."""
     from agent_surf import credentials
@@ -631,7 +644,7 @@ COMMANDS = {"chrome": cmd_chrome, "learn": cmd_learn, "run": cmd_run, "maps": cm
             "youtube": cmd_youtube, "scrub": cmd_scrub, "learn-action": cmd_learn_action,
             "queue": cmd_queue, "publish": cmd_publish, "dispatch": cmd_dispatch, "inbox": cmd_inbox,
             "receipts": cmd_receipts, "items": cmd_items, "purge": cmd_purge, "account": cmd_account, "actions": cmd_actions,
-            "key": cmd_key}
+            "key": cmd_key, "doctor": cmd_doctor}
 
 
 def main(argv: list[str] | None = None) -> int:
