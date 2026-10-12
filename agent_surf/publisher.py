@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from agent_surf import actionmap, challenge, outbox, runner, sitemap, sites
+from agent_surf import actionmap, budget, challenge, outbox, runner, sitemap, sites
+from agent_surf.browser import BrowserClosed, is_closed_error, page_alive
 from agent_surf.executor import (ActionPage, Refused, StepFailed, SubmitUnknown, Submitter,
                                  normalize_text)
 from agent_surf.store import Store
@@ -417,16 +418,38 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
         if _submitted_at(store, item_id, logrow) is not None:   # never: the guard runs before the click
             raise RuntimeError(f"queue item {item_id}: logged out after submit; outcome unknown")
 
+    def stopped(e: Exception) -> None:
+        """Fix 30: the tab or Chrome closed, the time budget ran out or the
+        machine slept before the submit click: nothing was submitted, so the
+        item goes back to approved (with last_error) and the error is raised."""
+        assert_not_submitted()
+        error = f"not attempted (nothing submitted): {e}"
+        outbox.release(store, item_id, error)
+        logrow.completed(f"stopped: {str(e)[:200]}")
+        log.warning("queue item %s stays approved: %s", item_id, error)
+        raise e
+
     while True:
-        page = open_page(site)
-        sub = Submitter(page, amap, payload, guard)
+        page = sub = None
         try:
-            sub.start()
-            sub.run_steps()
-            since = sub.submit()
+            try:
+                page = open_page(site)
+                sub = Submitter(page, amap, payload, guard)
+                sub.start()
+                sub.run_steps()
+                since = sub.submit()
+            except (SubmitUnknown, challenge.LoggedOut, budget.BudgetExceeded, BrowserClosed):
+                raise
+            except Exception as e:   # a dead tab surfaces as any error: never a bad map
+                if is_closed_error(e) or (page is not None and not page_alive(page.raw)):
+                    raise BrowserClosed() from None
+                raise
+            budget.suspend_rest()   # submitted: resolve the outcome whatever the clock says
             logrow.submitted(submit_moment())
             notes += sub.notes
             break
+        except (BrowserClosed, budget.BudgetExceeded) as e:
+            stopped(e)
         except challenge.LoggedOut as e:
             logged_out(page, e)
             continue
@@ -434,6 +457,7 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
             _discard_quietly(sub)
             return _finish(store, item_id, "needs_attention", logrow, error=f"refused: {e}", notes=sub.notes)
         except SubmitUnknown as e:
+            budget.suspend_rest()
             logrow.submitted(submit_moment())
             return resolve_unknown(store, open_page, item, amap, logrow, str(e))
         except StepFailed as e:
@@ -459,7 +483,11 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
             except challenge.LoggedOut as le:
                 logged_out(page, le)
                 continue
+            except (BrowserClosed, budget.BudgetExceeded) as le:
+                stopped(le)
             except Exception as le:
+                if is_closed_error(le):
+                    stopped(BrowserClosed())
                 return _finish(store, item_id, "needs_attention", logrow,
                                error=f"step failed before submit ({e}); relearn failed: {le}")
 

@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from agent_surf import challenge, noresults, sitemap, sites
+from agent_surf import budget, challenge, noresults, sitemap, sites
 from agent_surf.browser import ReadOnlyPage
 from agent_surf.store import Store
 
@@ -195,6 +195,21 @@ def run(store: Store, page: ReadOnlyPage, site: str, page_type: str, *,
 
 
 def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard | None = None) -> RunResult:
+    """Fix 30: a spent time budget or a machine that slept ends the run
+    cleanly with what was captured (stop_reason "time_budget" or
+    "machine_slept"); those items are stored and recoverable (Fix 21)."""
+    result = RunResult()
+    try:
+        return _replay(m, page, store, url, guard, result)
+    except budget.BudgetExceeded as e:
+        result.stop_reason = e.reason
+        log.warning("%s %s: %s; returning the %d new item(s) captured so far", m["site"],
+                    m["page_type"], e, len(result.items))
+        return result
+
+
+def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | None,
+            result: RunResult) -> RunResult:
     guard = guard or (lambda p: None)
     site, page_type = m["site"], m["page_type"]
     max_scrolls = m["scroll"]["max_scrolls"]
@@ -203,7 +218,6 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
     max_items = m["limits"]["max_items"]
     sources = [m["source"]] + [s for s in sitemap.SOURCES if s != m["source"] and s in m]
 
-    result = RunResult()
     cursor = start_seq = page.buffer.last_seq
     page.goto(url)
     guard(page)

@@ -19,10 +19,11 @@ import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 from urllib.parse import urlsplit
 
-from agent_surf import sites
+from agent_surf import budget, sites
 
 log = logging.getLogger("agent_surf.browser")
 
@@ -31,6 +32,53 @@ DEFAULT_BUFFER_SIZE = 500
 
 class BrowserError(RuntimeError):
     pass
+
+
+CLOSED_MESSAGE = "the browser tab or Chrome closed during the run; rerun"
+_CLOSED_MARKERS = ("target page, context or browser has been closed", "browser has been closed",
+                   "target closed", "browser has disconnected", "connection closed",
+                   "browser closed", "page closed", "context closed")
+
+
+class BrowserClosed(BrowserError):
+    """Fix 30: the tab, its context or Chrome went away (closed, crashed, or the
+    machine slept and the connection dropped)."""
+
+    def __init__(self, message: str = CLOSED_MESSAGE):
+        super().__init__(message)
+
+
+def is_closed_error(e: BaseException) -> bool:
+    """Playwright's TargetClosedError, or an error saying the page, context or
+    browser is gone."""
+    if isinstance(e, BrowserClosed) or type(e).__name__ == "TargetClosedError":
+        return True
+    msg = str(e).lower()
+    return any(m in msg for m in _CLOSED_MARKERS)
+
+
+@contextmanager
+def closed_as_browser_closed() -> Iterator[None]:
+    """Turn Playwright's errors for a dead tab or browser into BrowserClosed."""
+    try:
+        yield
+    except BrowserClosed:
+        raise
+    except Exception as e:
+        if is_closed_error(e):
+            raise BrowserClosed() from None
+        raise
+
+
+def page_alive(raw: Any) -> bool:
+    """Is a Playwright page still open and its browser still connected?"""
+    try:
+        if raw.is_closed():
+            return False
+        browser = raw.context.browser
+        return browser is None or browser.is_connected()
+    except Exception:
+        return False
 
 
 def chrome_command(home: Path, cdp_url: str) -> str:
@@ -259,18 +307,30 @@ class ReadOnlyPage:
 
     # actions: navigate (domain-locked), scroll, wait
 
+    def _closed(self, e: BaseException) -> None:
+        """Re-raise a dead tab as BrowserClosed instead of swallowing it."""
+        if is_closed_error(e) or not page_alive(self._page):
+            raise BrowserClosed() from None
+
     def goto(self, url: str) -> None:
         sites.check_url(self.site, url)
+        budget.check()
         self.last_url = url
-        self._page.goto(url, wait_until="domcontentloaded")
+        with closed_as_browser_closed():
+            self._page.goto(url, wait_until="domcontentloaded")
         self.check_domain()
 
     def scroll(self) -> None:
-        height = self._page.evaluate("() => window.innerHeight") or 800
-        self._page.mouse.wheel(0, int(height * 0.9))
+        budget.check()
+        with closed_as_browser_closed():
+            height = self._page.evaluate("() => window.innerHeight") or 800
+            self._page.mouse.wheel(0, int(height * 0.9))
 
     def wait(self, seconds: float) -> None:
-        self._page.wait_for_timeout(seconds * 1000)
+        budget.check()
+        with closed_as_browser_closed():
+            self._page.wait_for_timeout(seconds * 1000)
+        budget.check()
 
     def expand(self, selectors: list[str], max_clicks: int = MAX_CLICKS_PER_PASS) -> tuple[int, bool]:
         """Click safe "show more" controls matching stored selectors.
@@ -284,6 +344,7 @@ class ReadOnlyPage:
             try:
                 candidates = self._page.evaluate(_CLICK_CANDIDATES_JS, [sel, CANDIDATES_PER_SELECTOR])
             except Exception as e:
+                self._closed(e)
                 log.warning("click candidates failed: %s", type(e).__name__)
                 continue
             for c in candidates:
@@ -296,7 +357,8 @@ class ReadOnlyPage:
                     if loc.inner_text(timeout=1000).strip()[:200] != c["text"]:
                         continue  # the DOM moved under us; re-check next pass
                     loc.click(timeout=2000)
-                except Exception:
+                except Exception as e:
+                    self._closed(e)
                     continue
                 clicks += 1
                 if self._page.url != start_url:
@@ -317,7 +379,8 @@ class ReadOnlyPage:
     def title(self) -> str:
         try:
             return self._page.title()
-        except Exception:
+        except Exception as e:
+            self._closed(e)
             return ""
 
     def frame_urls(self) -> list[str]:
@@ -326,14 +389,15 @@ class ReadOnlyPage:
         try:
             urls += self._page.evaluate(
                 "() => Array.from(document.querySelectorAll('iframe'), f => f.src || '')")
-        except Exception:
-            pass
+        except Exception as e:
+            self._closed(e)
         return urls
 
     def aria_snapshot(self) -> str:
         try:
             return self._page.locator("body").aria_snapshot()
         except Exception as e:
+            self._closed(e)
             log.warning("aria snapshot failed: %s", type(e).__name__)
             return ""
 
@@ -344,6 +408,7 @@ class ReadOnlyPage:
                 "s => { try { return document.querySelectorAll(s).length; } catch (e) { return 0; } }",
                 selector) or 0)
         except Exception as e:
+            self._closed(e)
             log.warning("element count failed: %s", type(e).__name__)
             return 0
 
@@ -354,6 +419,7 @@ class ReadOnlyPage:
         try:
             rows = self._page.evaluate(_DOM_EXTRACT_JS, [dom["item"], dom["id_attr"], dom["fields"]])
         except Exception as e:
+            self._closed(e)
             log.warning("DOM extraction failed: %s", type(e).__name__)
             return []
         return [{"item_id": normalize_id(r.get("id")), "fields": r.get("fields") or {}} for r in rows]

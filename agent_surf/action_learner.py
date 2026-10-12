@@ -22,7 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agent_surf import actionmap, challenge, learner, noresults, runner, sitemap, sites
+from agent_surf import actionmap, budget, challenge, learner, noresults, runner, sitemap, sites
+from agent_surf.browser import BrowserClosed, is_closed_error, page_alive
 from agent_surf.actionmap import (ActionMapError, COMPOSER_CLICK_LABELS, DISCARD_CLICK_LABELS,
                                   SUBMIT_LABELS)
 from agent_surf.executor import ActionPage, Refused, StepFailed, StepRunner
@@ -155,7 +156,7 @@ def wait_for_composer(page: ActionPage, since_seq: int, guard: Any) -> None:
             last = snap
         if tracker.quiet() or time.monotonic() >= deadline:
             return
-        page.raw.wait_for_timeout(runner.FIRST_PASS_POLL_S * 1000)
+        page.read.wait(runner.FIRST_PASS_POLL_S)   # checks the time budget (Fix 30)
         guard(page.read)
 
 
@@ -191,7 +192,20 @@ def _rehearse_pass(page: ActionPage, m: dict, payload: dict, guard: Any, name: s
         label = run.submit_target_ok()
         run.notes.append(f"submit target found and enabled: {label!r} (not clicked)")
         run.discard()
-    except (StepFailed, Refused, sites.DomainRefused) as e:
+    except budget.BudgetExceeded:
+        with budget.suspended():   # Fix 30: out of time, but leave no draft behind
+            try:
+                run.discard()
+            except Exception:
+                pass
+        raise
+    except BrowserClosed:
+        raise
+    except Exception as e:
+        if is_closed_error(e) or not page_alive(page.raw):   # Fix 30: a dead tab is not a bad map
+            raise BrowserClosed() from None
+        if not isinstance(e, (StepFailed, Refused, sites.DomainRefused)):
+            raise
         try:
             run.discard()  # best effort: leave no draft behind
         except Exception:

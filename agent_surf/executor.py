@@ -24,9 +24,9 @@ import time
 import unicodedata
 from typing import Any, Callable
 
-from agent_surf import actionmap, challenge, sitemap, sites
+from agent_surf import actionmap, budget, challenge, sitemap, sites
 from agent_surf.actionmap import PRESS_KEYS, SUBMIT_LABELS, Resolved, candidates, try_resolve
-from agent_surf.browser import ACCESSIBLE_NAME_FN, ReadOnlyPage
+from agent_surf.browser import ACCESSIBLE_NAME_FN, ReadOnlyPage, closed_as_browser_closed
 
 log = logging.getLogger("agent_surf.executor")
 
@@ -157,8 +157,15 @@ class StepRunner:
     def _guard(self) -> None:
         # Fix 22: a login wall stops the run here (challenge.LoggedOut); the
         # publisher waits for the login and starts over on a fresh tab.
+        # Fix 30: so does a spent time budget or a machine that slept.
+        budget.check()
         challenge.ensure_logged_in(self.page.read)
         self.guard(self.page.read)
+
+    def _pause(self, ms: int) -> None:
+        budget.check()
+        with closed_as_browser_closed():
+            self.raw.wait_for_timeout(ms)
 
     def _check_domain(self) -> None:
         """Fix 11: the tab must still be on the site (a click on a link could
@@ -198,7 +205,7 @@ class StepRunner:
                 return self.composer
             if time.monotonic() >= deadline:
                 raise StepFailed(where, f"composer container not found: {self._composer_target()}")
-            self.raw.wait_for_timeout(250)
+            self._pause(250)
 
     def _live_container(self) -> Any:
         """The container if it is (or can now be) pinned and alive; never raises."""
@@ -240,7 +247,7 @@ class StepRunner:
             if time.monotonic() >= deadline:
                 inside = " in the composer" if scope == "composer" and self._composer_target() else ""
                 raise StepFailed(where, f"target not found{inside}: {target}")
-            self.raw.wait_for_timeout(250)
+            self._pause(250)
 
     def _gone(self, target: dict) -> bool:
         """For "hidden" waits: the element this run used is detached or hidden,
@@ -358,7 +365,7 @@ class StepRunner:
                 return True
             if time.monotonic() >= deadline:
                 return False
-            self.raw.wait_for_timeout(100)
+            self._pause(100)
 
     def _clear(self, loc: Any) -> None:
         loc.focus()
@@ -426,7 +433,7 @@ class StepRunner:
             while not self._gone(step["target"]):
                 if time.monotonic() >= deadline:
                     raise StepFailed(where, f"still visible: {step['target']}")
-                self.raw.wait_for_timeout(200)
+                self._pause(200)
             return
         loc = self._resolve(step["target"], where).locator
         if state == "enabled":
@@ -434,7 +441,7 @@ class StepRunner:
             while not loc.is_enabled():
                 if time.monotonic() >= deadline:
                     raise StepFailed(where, f"never enabled: {step['target']}")
-                self.raw.wait_for_timeout(200)
+                self._pause(200)
 
     def _run_step(self, step: dict, where: Any, allowed: tuple) -> None:
         op = step.get("op")

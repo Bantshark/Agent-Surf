@@ -14,7 +14,7 @@ import logging
 import sys
 from typing import Any
 
-from agent_surf import challenge, config, sitemap, sites
+from agent_surf import budget, challenge, config, sitemap, sites
 from agent_surf.browser import BrowserError, BrowserSession, cdp_endpoint, chrome_instructions
 from agent_surf.store import Store
 
@@ -359,7 +359,7 @@ def _publish_one(cfg: config.Config, store: Store, item_id: int,
     from agent_surf import publisher
     from agent_surf.executor import ActionPage
 
-    with BrowserSession(cdp_endpoint(cfg)) as session:
+    with budget.limit("publish"), BrowserSession(cdp_endpoint(cfg)) as session:
         def open_page(site: sites.Site) -> ActionPage:
             return ActionPage(session.open_tab(), site)
         return publisher.publish(store, open_page, item_id, client=make_client(cfg), model=cfg.model,
@@ -647,6 +647,11 @@ COMMANDS = {"chrome": cmd_chrome, "learn": cmd_learn, "run": cmd_run, "maps": cm
             "key": cmd_key, "doctor": cmd_doctor}
 
 
+# Fix 30: commands with a wall-clock budget (budget.py). publish and dispatch
+# get one per item in _publish_one.
+BUDGETED = {"run": "run", "inbox": "run", "learn": "learn", "learn-action": "learn"}
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows redirects stdout as cp1252; items routinely contain emoji.
     for stream in (sys.stdout, sys.stderr):
@@ -659,13 +664,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command not in ("chrome", "scrub", "key"):
             cfg.ensure_dirs()
-        return COMMANDS[args.command](cfg, args)
+        kind = BUDGETED.get(args.command)
+        if kind is None:
+            return COMMANDS[args.command](cfg, args)
+        with budget.limit(kind):   # Fix 30: wall-clock budget and sleep detection
+            return COMMANDS[args.command](cfg, args)
     except challenge.ChallengeTimeout as e:
         log.error("%s", e)
         return EXIT_CHALLENGE
     except challenge.LoggedOut as e:
         log.error("%s", e)
         return EXIT_LOGGED_OUT
+    except budget.BudgetExceeded as e:   # Fix 30: learn/learn-action/publish ran out of time
+        log.error("%s; nothing was saved or submitted", e)
+        return EXIT_ERROR
     except Exception as e:
         from agent_surf import credentials, learner, runner, youtube
 
@@ -674,5 +686,10 @@ def main(argv: list[str] | None = None) -> int:
                  credentials.CredentialError, ValueError, OSError)  # QueueError/IllegalTransition/ActionMapError are ValueErrors
         if isinstance(e, known):
             log.error("%s", e)
+            return EXIT_ERROR
+        from agent_surf.browser import CLOSED_MESSAGE, is_closed_error
+
+        if is_closed_error(e):   # Fix 30: a dead tab or Chrome, never a traceback
+            log.error("%s", CLOSED_MESSAGE)
             return EXIT_ERROR
         raise
