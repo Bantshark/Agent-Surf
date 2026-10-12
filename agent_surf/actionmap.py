@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_surf import sitemap, sites
+from agent_surf.config import private_dir
 from agent_surf.outbox import ACTIONS, PAYLOAD_KEYS
 from agent_surf.store import Store, now_iso
 
@@ -266,12 +267,9 @@ def validate_action_map(m: Any) -> list[str]:
                 else:
                     for k in sorted(set(net) - {"url_regex", "method", "id_path", "error_path"}):
                         problems.append(f"confirm.network: unknown key {k}")
-                    try:
-                        re.compile(net.get("url_regex") or "")
-                        if not net.get("url_regex"):
-                            problems.append("confirm.network.url_regex: must be non-empty")
-                    except (re.error, TypeError) as e:
-                        problems.append(f"confirm.network.url_regex: does not compile ({e})")
+                    problem = sitemap.url_regex_problem(net.get("url_regex"))
+                    if problem:
+                        problems.append(f"confirm.network.url_regex: {problem}")
                     if net.get("method", "POST") not in ("POST", "PUT", "PATCH"):
                         problems.append("confirm.network.method: must be POST, PUT or PATCH")
                     for k in ("id_path", "error_path"):
@@ -350,10 +348,10 @@ def save_action_map(store: Store, maps_dir: str | Path, m: dict) -> Path:
     if problems:
         raise ActionMapError("; ".join(problems))
     maps_dir = Path(maps_dir)
-    maps_dir.mkdir(parents=True, exist_ok=True)
+    private_dir(maps_dir)
     path = maps_dir / action_map_filename(m["site"], m["action"], m["version"])
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(m, indent=2, ensure_ascii=False) + "\n")
+    tmp.write_text(json.dumps(m, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp.replace(path)
     with store.conn:
         store.conn.execute("INSERT INTO action_maps (site, action, version, path, created_at)"
@@ -363,7 +361,7 @@ def save_action_map(store: Store, maps_dir: str | Path, m: dict) -> Path:
 
 def load_action_map(path: str | Path) -> dict:
     try:
-        m = json.loads(Path(path).read_text())
+        m = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise ActionMapError(f"cannot read action map {path}: {e}") from e
     problems = validate_action_map(m)

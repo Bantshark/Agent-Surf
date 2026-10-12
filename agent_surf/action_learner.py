@@ -11,6 +11,7 @@ the composer, and no create request may have been sent. Only then is it saved.
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
 import secrets
@@ -112,7 +113,12 @@ def write_debug(debug_root: str | Path, site: str, action: str, *, amap: dict, e
     while folder.exists():
         n += 1
         folder = root / f"{stamp}-{site}-{action}-{n}"
-    folder.mkdir(parents=True)
+    from agent_surf.config import private_dir
+
+    private_dir(root)
+    folder.mkdir()
+    if os.name == "posix":
+        os.chmod(folder, 0o700)
     name = "rejected-map.json" if error else "learned-map.json"
     (folder / name).write_text(json.dumps(amap, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (folder / "error.txt").write_text((error or "no error: rehearsal passed") + "\n", encoding="utf-8")
@@ -218,7 +224,8 @@ def _rehearse_pass(page: ActionPage, m: dict, payload: dict, guard: Any, name: s
     net = m["confirm"].get("network")
     if net:
         rx = re.compile(net["url_regex"])
-        if any(meth == net.get("method", "POST") and rx.search(u) for meth, u in page.requests[first_request:]):
+        if any(meth == net.get("method", "POST") and sitemap.url_matches(rx, u)
+               for meth, u in page.requests[first_request:]):
             raise ActionLearnError(f"rehearsal failed ({name}): a create request was sent", notes)
     return notes
 

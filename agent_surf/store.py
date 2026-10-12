@@ -124,7 +124,9 @@ def new_run_id() -> str:
 class Store:
     def __init__(self, path: str | Path):
         if str(path) != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            from agent_surf.config import private_dir
+
+            private_dir(Path(path).parent)
             self.home: Path | None = Path(path).parent
         else:
             self.home = None

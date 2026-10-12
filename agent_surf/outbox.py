@@ -201,10 +201,10 @@ def remove_snapshot(store: Store, item_id: int) -> None:
 def take_snapshot(store: Store, item_id: int, paths: list[str]) -> list[str]:
     folder = snapshot_dir(store, item_id)
     shutil.rmtree(folder, ignore_errors=True)       # re-approval re-snapshots
-    folder.mkdir(parents=True)
-    if os.name == "posix":
-        os.chmod(store.media_dir, 0o700)
-        os.chmod(folder, 0o700)
+    from agent_surf.config import private_dir
+
+    private_dir(store.media_dir)
+    private_dir(folder)
     out = []
     for n, src in enumerate(paths):
         dst = folder / f"{n}{Path(src).suffix.lower()}"

@@ -36,6 +36,65 @@ MIN_DELAY_S = 1.0
 _NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 
+# Fix 35: a model-written url_regex runs on every captured URL. Patterns that
+# can backtrack catastrophically (nested quantifiers such as (a+)+) or are very
+# long are refused; matching only looks at the first URL_SEARCH_CHARS.
+MAX_URL_REGEX = 300
+URL_SEARCH_CHARS = 2000
+
+try:
+    from re import _parser as _sre_parse
+    from re import _constants as _sre_constants
+except ImportError:  # pragma: no cover - older Pythons
+    import sre_constants as _sre_constants  # type: ignore[no-redef]
+    import sre_parse as _sre_parse  # type: ignore[no-redef]
+
+_REPEATS = {_sre_constants.MAX_REPEAT, _sre_constants.MIN_REPEAT}
+if hasattr(_sre_constants, "POSSESSIVE_REPEAT"):
+    _REPEATS.add(_sre_constants.POSSESSIVE_REPEAT)
+
+
+def _nested_repeat(items: Any, inside: bool = False) -> bool:
+    for op, av in items:
+        if op in _REPEATS:
+            lo, hi, sub = av
+            many = hi > 1
+            if many and inside:
+                return True
+            if _nested_repeat(sub, inside or many):
+                return True
+        elif op is _sre_constants.SUBPATTERN:
+            if _nested_repeat(av[-1], inside):
+                return True
+        elif op is _sre_constants.BRANCH:
+            if any(_nested_repeat(b, inside) for b in av[1]):
+                return True
+        elif op in (_sre_constants.ASSERT, _sre_constants.ASSERT_NOT):
+            if _nested_repeat(av[1], inside):
+                return True
+    return False
+
+
+def url_regex_problem(rx: Any) -> str | None:
+    """Why a url_regex is refused, or None."""
+    if not isinstance(rx, str) or not rx:
+        return "must be a non-empty string"
+    if len(rx) > MAX_URL_REGEX:
+        return f"is longer than {MAX_URL_REGEX} characters"
+    try:
+        tree = _sre_parse.parse(rx)
+    except re.error as e:
+        return f"does not compile ({e})"
+    if _nested_repeat(tree):
+        return "has nested quantifiers (like (a+)+), which can hang a run"
+    return None
+
+
+def url_matches(rx: re.Pattern, url: str) -> bool:
+    """Search only the first URL_SEARCH_CHARS of a URL."""
+    return bool(rx.search((url or "")[:URL_SEARCH_CHARS]))
+
+
 class PathError(ValueError):
     pass
 
@@ -160,15 +219,10 @@ def _check_stream(m: dict, stream: str, problems: list[str]) -> None:
             _check_keys(net, NETWORK_KEYS, stream, problems)
             for k in sorted(NETWORK_KEYS - set(net)):
                 problems.append(f"{stream}: missing key {k}")
-            rx = net.get("url_regex")
             if "url_regex" in net:
-                if not isinstance(rx, str) or not rx:
-                    problems.append(f"{stream}.url_regex: must be a non-empty string")
-                else:
-                    try:
-                        re.compile(rx)
-                    except re.error as e:
-                        problems.append(f"{stream}.url_regex: does not compile ({e})")
+                problem = url_regex_problem(net.get("url_regex"))
+                if problem:
+                    problems.append(f"{stream}.url_regex: {problem}")
             for k in ("items_path", "id_path"):
                 if k in net:
                     _check_path(net[k], f"{stream}.{k}", problems)
@@ -313,7 +367,7 @@ def items_from_responses(network: dict, responses: Iterable[Any]) -> list[dict]:
     rx = re.compile(network["url_regex"])
     out: list[dict] = []
     for r in responses:
-        if rx.search(r.url):
+        if url_matches(rx, r.url):
             out.extend(items_from_json(network, r.data))
     return out
 
@@ -398,17 +452,19 @@ def save_map(maps_dir: str | Path, m: dict) -> Path:
     if "version" not in m:
         raise MapError("version is required to save a map")
     maps_dir = Path(maps_dir)
-    maps_dir.mkdir(parents=True, exist_ok=True)
+    from agent_surf.config import private_dir
+
+    private_dir(maps_dir)
     path = maps_dir / map_filename(m["site"], m["page_type"], m["version"])
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(m, indent=2, ensure_ascii=False) + "\n")
+    tmp.write_text(json.dumps(m, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp.replace(path)
     return path
 
 
 def load_map(path: str | Path) -> dict:
     try:
-        m = json.loads(Path(path).read_text())
+        m = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise MapError(f"cannot read map {path}: {e}") from e
     problems = validate_map(m)

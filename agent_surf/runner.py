@@ -133,7 +133,7 @@ def content_ready(m: dict, source: str, page: ReadOnlyPage, since_seq: int) -> b
     dom.item element (dom)?"""
     if source in sitemap.STREAM_SOURCES:
         rx = re.compile(m[source]["url_regex"])
-        return any(rx.search(r.url) for r in _stream(page.buffer.since(since_seq), source))
+        return any(sitemap.url_matches(rx, r.url) for r in _stream(page.buffer.since(since_seq), source))
     return bool(page.dom_items(m["dom"]))
 
 
@@ -295,7 +295,7 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
     if expand():
         page.wait(delay)
         guard(page)
-
+        page.check_domain()   # Fix 35: as after every scroll
     # Measured here (after navigation and one wait, before any scroll, as the
     # learner does); counted only once the first pass found items (an empty
     # result page is not a layout change).

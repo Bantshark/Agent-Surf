@@ -149,11 +149,16 @@ def send_telegram(text: str, token: str, chat_id: str, *,
         data=urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode(),
         method="POST",
     )
+    failure = None
     try:
         with urlopen(req, timeout=10) as resp:
             ok = 200 <= getattr(resp, "status", 200) < 300
     except Exception as e:
-        log.warning("Telegram notification failed (%s)", type(e).__name__)
+        failure = type(e).__name__   # the exception (its message may hold the URL) goes no further
+    if failure is not None:
+        # Logged outside the except block (Fix 35): a failing log handler prints
+        # the exception being handled, and that one carries the token in its URL.
+        log.warning("Telegram notification failed (%s)", failure)
         return False
     if not ok:
         log.warning("Telegram notification failed (HTTP %s)", getattr(resp, "status", "?"))

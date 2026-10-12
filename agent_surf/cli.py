@@ -27,12 +27,18 @@ EXIT_MAP_BROKEN = 4
 EXIT_PUBLISH_REFUSED = 5    # not attempted: not approved, content changed, no action map, caps
 EXIT_NEEDS_ATTENTION = 6    # attempted, not confirmed published: see `queue show <id>`
 EXIT_LOGGED_OUT = 7         # login wall not cleared in time; a queue item stays approved
+EXIT_USAGE = 2
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agent-surf", description="Local agent browser with interface memory.")
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--json", action="store_true", help="print the result as JSON")
+    # Fix 35: on nested subcommands --json defaults to SUPPRESS, so `queue --json
+    # list` (given before the subcommand) is not reset by the nested parser.
+    nested = argparse.ArgumentParser(add_help=False)
+    nested.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="print the result as JSON")
     sub = p.add_subparsers(dest="command", required=True)
     _add = sub.add_parser
 
@@ -56,11 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     maps = sub.add_parser("maps", help="list or show learned maps")
     msub = maps.add_subparsers(dest="maps_command", required=True)
-    msub.add_parser("list", parents=[common])
-    show = msub.add_parser("show", parents=[common])
+    msub.add_parser("list", parents=[nested])
+    show = msub.add_parser("show", parents=[nested])
     show.add_argument("site")
     show.add_argument("page_type")
-    rb = msub.add_parser("rebaseline", parents=[common],
+    rb = msub.add_parser("rebaseline", parents=[nested],
                          help="store the current page's layout fingerprint as the map's baseline "
                               "(one tab, no model call)")
     target_args(rb)
@@ -90,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     q = sub.add_parser("queue", help="add, review, approve or reject what will be published")
     qsub = q.add_subparsers(dest="queue_command", required=True)
-    qa = qsub.add_parser("add", parents=[common], help="add a draft")
+    qa = qsub.add_parser("add", parents=[nested], help="add a draft")
     qa.add_argument("site")
     qa.add_argument("action", choices=["post", "reply", "dm", "comment"])
     qa.add_argument("--text")
@@ -100,15 +106,17 @@ def build_parser() -> argparse.ArgumentParser:
     qa.add_argument("--at", help="ISO 8601 time to publish (no offset = local time)")
     qa.add_argument("--missed", choices=["skip", "run", "ask"], default="ask",
                     help="if the machine was asleep at --at (default ask)")
-    ql = qsub.add_parser("list", parents=[common])
+    ql = qsub.add_parser("list", parents=[nested])
     ql.add_argument("--status")
-    qs = qsub.add_parser("show", parents=[common])
+    qs = qsub.add_parser("show", parents=[nested])
     qs.add_argument("id", type=int)
-    qp = qsub.add_parser("approve", parents=[common], help="freeze the content and allow publishing")
+    qp = qsub.add_parser("approve", parents=[nested], help="freeze the content and allow publishing")
     g = qp.add_mutually_exclusive_group(required=True)
     g.add_argument("id", type=int, nargs="?")
     g.add_argument("--all-drafts", action="store_true")
-    qr = qsub.add_parser("reject", parents=[common])
+    qp.add_argument("--yes", action="store_true",
+                    help="with --all-drafts: approve every draft without listing them first")
+    qr = qsub.add_parser("reject", parents=[nested])
     qr.add_argument("id", type=int)
 
     pub = sub.add_parser("publish", help="publish one approved queue item and read back its receipt")
@@ -136,22 +144,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     st = sub.add_parser("sites", help="list sites; add custom publication domains (Substack)")
     stsub = st.add_subparsers(dest="sites_command", required=True)
-    stsub.add_parser("list", parents=[common])
+    stsub.add_parser("list", parents=[nested])
     for name, what in (("add-domain", "allow"), ("remove-domain", "stop allowing")):
-        sp = stsub.add_parser(name, parents=[common], help=f"{what} a custom publication domain")
+        sp = stsub.add_parser(name, parents=[nested], help=f"{what} a custom publication domain")
         sp.add_argument("site")
         sp.add_argument("domain")
 
     acct = sub.add_parser("account", help="your own handle per site (for checking unknown outcomes)")
     asub = acct.add_subparsers(dest="account_command", required=True)
-    aset = asub.add_parser("set", parents=[common])
+    aset = asub.add_parser("set", parents=[nested])
     aset.add_argument("site")
     aset.add_argument("--handle", required=True)
-    asub.add_parser("show", parents=[common])
+    asub.add_parser("show", parents=[nested])
 
     acts = sub.add_parser("actions", help="edit learned action maps (always as a new version)")
     actsub = acts.add_subparsers(dest="actions_command", required=True)
-    sl = actsub.add_parser("set-lookup", parents=[common],
+    sl = actsub.add_parser("set-lookup", parents=[nested],
                            help="where to look for your post after an unknown outcome")
     sl.add_argument("site")
     sl.add_argument("action", choices=["post", "reply", "dm", "comment"])
@@ -166,8 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     key = sub.add_parser("key", help="store the Anthropic API key in the Windows Credential Manager")
     ksub = key.add_subparsers(dest="key_command", required=True)
-    ksub.add_parser("set", parents=[common], help="prompt for the key (hidden) and store it")
-    ksub.add_parser("clear", parents=[common], help="remove the stored key")
+    ksub.add_parser("set", parents=[nested], help="prompt for the key (hidden) and store it")
+    ksub.add_parser("clear", parents=[nested], help="remove the stored key")
 
     pg = sub.add_parser("purge", help="delete old stored items and debug folders (maps, queue, "
                                       "receipts and seen ids are kept)")
@@ -455,6 +463,12 @@ def cmd_queue(cfg: config.Config, args: argparse.Namespace) -> int:
                       if "path" in m else f"media: {m['error']}" for i, m in enumerate(media)]
             emit(args, item, "\n".join(lines))
         elif c == "approve":
+            if args.all_drafts and not args.yes:   # Fix 35: never approve unseen drafts by accident
+                drafts = outbox.list_items(store, "draft")
+                print("\n".join(_item_line(i) for i in drafts) or "no drafts", file=sys.stderr)
+                log.error("--all-drafts approves the %d draft(s) above; review them (queue show <id>), "
+                          "then rerun with --yes", len(drafts))
+                return EXIT_USAGE
             items = outbox.approve_all_drafts(store) if args.all_drafts else [outbox.approve(store, args.id)]
             log.info("approved %d item(s); content is frozen (content_hash)", len(items))
             emit(args, items, "\n".join(_item_line(i) for i in items) or None)
@@ -465,10 +479,16 @@ def cmd_queue(cfg: config.Config, args: argparse.Namespace) -> int:
 
 
 def cmd_publish(cfg: config.Config, args: argparse.Namespace) -> int:
-    from agent_surf import publisher
+    from agent_surf import actionmap, outbox, publisher
 
     with Store(cfg.db_path) as store:
         try:
+            item = outbox.get(store, args.id)
+            try:   # Fix 35: an invalid action map is a refusal (exit 5), checked before Chrome
+                actionmap.current_action_map(store, item["site"], item["action"])
+            except actionmap.ActionMapError as e:
+                raise publisher.PublishRefused(
+                    f"the current {item['site']} {item['action']} action map is invalid: {e}") from None
             result = _publish_one(cfg, store, args.id)
         except publisher.PublishRefused as e:
             log.error("not published: %s", e)
@@ -733,7 +753,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = config.load()
     try:
         if args.command not in ("chrome", "scrub", "key"):
-            cfg.ensure_dirs()
+            cfg.ensure_dirs()   # 0700 on POSIX (Fix 35)
             load_custom_domains(cfg)
         kind = BUDGETED.get(args.command)
         if kind is None:

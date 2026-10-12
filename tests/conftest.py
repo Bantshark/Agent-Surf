@@ -63,6 +63,28 @@ COMPOSE_SITE = sites.Site("composetest", ("compose.test",), {
 
 
 @pytest.fixture(autouse=True)
+def isolated_logging():
+    """Fix 35: cli.main() installs a root handler on the (captured) stderr of the
+    test that ran it; later tests must not log into that closed stream, so the
+    root and agent_surf loggers are put back after every test."""
+    import logging
+
+    root = logging.getLogger()
+    ours = logging.getLogger("agent_surf")
+    saved = (list(root.handlers), root.level, list(ours.handlers), ours.level, ours.disabled)
+    yield
+    for h in list(root.handlers):
+        if h not in saved[0]:
+            root.removeHandler(h)
+    root.setLevel(saved[1])
+    for h in list(ours.handlers):
+        if h not in saved[2]:
+            ours.removeHandler(h)
+    ours.setLevel(saved[3])
+    ours.disabled = saved[4]
+
+
+@pytest.fixture(autouse=True)
 def no_credential_manager(monkeypatch):
     """Tests never read a real Windows Credential Manager entry (Fix 27);
     test_credentials.py turns this off with a fake advapi32."""

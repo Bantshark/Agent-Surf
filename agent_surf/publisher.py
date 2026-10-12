@@ -94,7 +94,7 @@ def _await_network_confirm(page: ActionPage, net: dict, since_seq: int) -> tuple
         if not sites.is_allowed_url(page.site, page.raw.url):
             raise SubmitUnknown(f"the tab left the site after submit ({page.raw.url[:200]})")
         for r in page.buffer.since(since_seq):
-            if r.method == method and rx.search(r.url):
+            if r.method == method and sitemap.url_matches(rx, r.url):
                 errors = sitemap.get_one(r.data, net.get("error_path", "errors"))
                 if not sitemap.is_missing(errors):
                     return None, f"platform returned errors (HTTP {r.status}): {str(errors)[:300]}"
@@ -375,7 +375,10 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
     if problem:
         outbox.transition(store, item_id, "needs_attention", last_error=problem)
         raise PublishRefused(f"queue item {item_id}: {problem}")
-    amap = actionmap.current_action_map(store, item["site"], item["action"])
+    try:
+        amap = actionmap.current_action_map(store, item["site"], item["action"])
+    except actionmap.ActionMapError as e:   # Fix 35: an invalid map refuses (exit 5), not attempted
+        raise PublishRefused(f"the current {item['site']} {item['action']} action map is invalid: {e}") from None
     if amap is None:
         raise PublishRefused(f"no action map for {item['site']} {item['action']}; "
                              f"run: agent-surf learn-action {item['site']} {item['action']}")

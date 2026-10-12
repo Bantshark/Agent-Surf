@@ -440,7 +440,7 @@ def read_devtools_active_port(profile_dir: str | Path) -> str:
     for that profile, e.g. via chrome://inspect/#remote-debugging (Chrome 144+)."""
     path = Path(profile_dir) / "DevToolsActivePort"
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise BrowserError(
             f"{path} not found: turn on remote debugging for this profile "

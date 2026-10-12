@@ -24,10 +24,18 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
 SENSITIVE_HEADERS = {"cookie", "set-cookie", "authorization", "x-csrf-token", "x-guest-token"}
-SENSITIVE_RE = re.compile(r"(?i)token|auth|session|csrf")
+# "auth" but not "author"/"authority" (Fix 35); "authorization" listed on its own.
+SENSITIVE_RE = re.compile(r"(?i)token|auth(?!or)|authori[sz]ation|session|csrf")
+# Values that are credentials whatever their name (Fix 35): bearer tokens and JWTs.
+BEARER_VALUE = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}")
+JWT_VALUE = re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}")
+# A URL path segment that looks like a secret: a JWT, or a long random-looking
+# token (32+ base64url/hex characters mixing letters and digits). Numeric ids
+# and short ids (X GraphQL query ids, YouTube ids) are kept.
+TOKEN_SEGMENT = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9_-]{32,}$")
 PII_RE = re.compile(r"(?i)email|phone|password|birth|address|dob|ssn")
 REDACTED = "REDACTED"
 TEXT_MIME = re.compile(r"(?i)json|^text/|javascript|xml|x-www-form-urlencoded")
@@ -38,7 +46,7 @@ def _key_sensitive(name: str) -> bool:
     return bool(SENSITIVE_RE.search(name) or PII_RE.search(name))
 
 
-_KEY_WORDS = r"token|auth|session|csrf|email|phone|password|birth|address|dob|ssn"
+_KEY_WORDS = r"token|auth(?!or)|authori[sz]ation|session|csrf|email|phone|password|birth|address|dob|ssn"
 # key: value / key=value / "key": "value" in HTML, inline scripts or plain text
 _TEXT_PAIR = re.compile(r"(?i)([\w-]*(?:" + _KEY_WORDS + r")[\w-]*)([\"']?\s*[:=]\s*[\"']?)([^\"'&\s<>,;}]+)")
 # <input name="csrf_token" value="..."> / <meta name="session" content="...">
@@ -57,7 +65,7 @@ def _redact_text(text: str, stats: ScrubStats) -> str:
         stats.params += 1
         return m.group(1) + m.group(2) + REDACTED
 
-    return _TEXT_PAIR.sub(pair, _ATTR_PAIR.sub(attr, text))
+    return redact_values(_TEXT_PAIR.sub(pair, _ATTR_PAIR.sub(attr, text)), stats)
 
 
 @dataclass
@@ -72,21 +80,61 @@ def is_sensitive(name: str) -> bool:
     return name.lower() in SENSITIVE_HEADERS or bool(SENSITIVE_RE.search(name))
 
 
+def redact_values(text: str, stats: ScrubStats | None = None) -> str:
+    """Bearer tokens and JWTs anywhere in a string, whatever the key name."""
+    def sub(m: re.Match) -> str:
+        if stats:
+            stats.params += 1
+        return REDACTED
+
+    return JWT_VALUE.sub(sub, BEARER_VALUE.sub(sub, text))
+
+
+def _scrub_pairs(raw: str, stats: ScrubStats | None) -> str:
+    """Redact sensitive key=value pairs in a query-like string, replacing only
+    the redacted values; every other byte is kept as it was (no re-encoding)."""
+    out = []
+    for part in raw.split("&"):
+        key, sep, value = part.partition("=")
+        if sep and SENSITIVE_RE.search(unquote_plus(key)):
+            if stats:
+                stats.params += 1
+            out.append(f"{key}={REDACTED}")
+        elif sep:
+            redacted = redact_values(unquote_plus(value), stats)
+            out.append(part if redacted == unquote_plus(value) else f"{key}={REDACTED}")
+        else:
+            out.append(part)
+    return "&".join(out)
+
+
+def _scrub_path(path: str, stats: ScrubStats | None) -> str:
+    segments = path.split("/")
+    for i, seg in enumerate(segments):
+        plain = unquote_plus(seg)
+        if TOKEN_SEGMENT.match(plain) or JWT_VALUE.fullmatch(plain):
+            segments[i] = REDACTED
+            if stats:
+                stats.params += 1
+    return "/".join(segments)
+
+
 def scrub_url(url: str, stats: ScrubStats | None = None) -> str:
+    """Redact credential-named query and fragment parameters (only their
+    values), token-shaped path segments and bearer/JWT values."""
     try:
         parts = urlsplit(url)
     except ValueError:
         return url
-    if not parts.query:
+    path = _scrub_path(parts.path, stats)
+    query = _scrub_pairs(parts.query, stats) if parts.query else parts.query
+    fragment = parts.fragment
+    if fragment:
+        fragment = (_scrub_pairs(fragment, stats) if "=" in fragment
+                    else redact_values(fragment, stats))
+    if (path, query, fragment) == (parts.path, parts.query, parts.fragment):
         return url
-    pairs = parse_qsl(parts.query, keep_blank_values=True)
-    hits = sum(1 for k, _ in pairs if SENSITIVE_RE.search(k))
-    if not hits:
-        return url
-    if stats:
-        stats.params += hits
-    query = urlencode([(k, REDACTED if SENSITIVE_RE.search(k) else v) for k, v in pairs])
-    return urlunsplit(parts._replace(query=query))
+    return urlunsplit(parts._replace(path=path, query=query, fragment=fragment))
 
 
 def _redact_json(obj: Any, stats: ScrubStats) -> Any:
@@ -101,6 +149,8 @@ def _redact_json(obj: Any, stats: ScrubStats) -> Any:
         return out
     if isinstance(obj, list):
         return [_redact_json(v, stats) for v in obj]
+    if isinstance(obj, str):
+        return redact_values(obj, stats)
     return obj
 
 
@@ -116,9 +166,10 @@ def _scrub_body(text: str, mime: str, stats: ScrubStats) -> str:
         if pairs:
             hits = sum(1 for k, _ in pairs if _key_sensitive(k))
             if not hits:
-                return text
+                return redact_values(text, stats)
             stats.params += hits
-            return urlencode([(k, REDACTED if _key_sensitive(k) else v) for k, v in pairs])
+            return urlencode([(k, REDACTED if _key_sensitive(k) else redact_values(v)) for k, v in pairs])
+    text = redact_values(text, stats)
     if SENSITIVE_RE.search(text):
         stats.bodies += 1
         return REDACTED
@@ -130,6 +181,8 @@ def _scrub_post_data(post: dict, stats: ScrubStats) -> None:
         if isinstance(p, dict) and _key_sensitive(str(p.get("name", ""))):
             p["value"] = REDACTED
             stats.params += 1
+        elif isinstance(p, dict) and isinstance(p.get("value"), str):
+            p["value"] = redact_values(p["value"], stats)
     if isinstance(post.get("text"), str) and post["text"]:
         post["text"] = _scrub_body(post["text"], str(post.get("mimeType", "")), stats)
 
@@ -139,6 +192,9 @@ def _scrub_message(msg: dict, stats: ScrubStats) -> None:
     if isinstance(headers, list):
         kept = [h for h in headers if not is_sensitive(str(h.get("name", "")))]
         stats.headers += len(headers) - len(kept)
+        for h in kept:   # Fix 35: a bearer/JWT value under any header name
+            if isinstance(h.get("value"), str):
+                h["value"] = redact_values(h["value"], stats)
         msg["headers"] = kept
     if "cookies" in msg:
         cookies = msg.pop("cookies")
@@ -153,6 +209,8 @@ def _scrub_message(msg: dict, stats: ScrubStats) -> None:
             if SENSITIVE_RE.search(str(p.get("name", ""))):
                 p["value"] = REDACTED
                 stats.params += 1
+            elif isinstance(p.get("value"), str):
+                p["value"] = redact_values(p["value"], stats)
     if isinstance(msg.get("postData"), dict):
         _scrub_post_data(msg["postData"], stats)
 

@@ -150,7 +150,7 @@ class StepRunner:
             net = (amap.get("confirm") or {}).get("network")
             if net and net.get("url_regex"):
                 rx = re.compile(net["url_regex"])
-                self.raw.route(lambda url: bool(rx.search(url)), lambda route: route.abort())
+                self.raw.route(lambda url: sitemap.url_matches(rx, url), lambda route: route.abort())
 
     # -- helpers ------------------------------------------------------------
 

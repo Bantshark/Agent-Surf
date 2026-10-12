@@ -110,7 +110,7 @@ def test_approve_all_reject_show(home, capsys, tmp_path):
                          "--target", "https://x.com/a/status/1", "--at", "2026-11-01T09:00:00Z",
                          "--missed", "skip", "--json")[1])["id"]
     run(capsys, "queue", "reject", str(ids[0]))
-    code, out, _ = run(capsys, "queue", "approve", "--all-drafts", "--json")
+    code, out, _ = run(capsys, "queue", "approve", "--all-drafts", "--yes", "--json")
     assert sorted(i["id"] for i in json.loads(out)) == sorted([ids[1], mid])
     code, out, _ = run(capsys, "queue", "show", str(mid), "--json")
     shown = json.loads(out)

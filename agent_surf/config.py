@@ -43,7 +43,19 @@ class Config:
         return self.home / "chrome-profile"
 
     def ensure_dirs(self) -> None:
-        self.maps_dir.mkdir(parents=True, exist_ok=True)
+        """AGENT_SURF_HOME and its folders, 0700 on POSIX (Fix 35)."""
+        for d in (self.home, self.maps_dir):
+            private_dir(d)
+
+
+def private_dir(path: Path) -> Path:
+    """mkdir -p, then 0700 on POSIX (the folder holds the queue, receipts,
+    debug evidence and media snapshots)."""
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        os.chmod(path, 0o700)
+    return path
 
 
 def _env(env: Mapping[str, str] | None) -> Mapping[str, str]:
