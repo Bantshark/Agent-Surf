@@ -160,8 +160,9 @@ def build_parser() -> argparse.ArgumentParser:
     slg.add_argument("--handle")
     slg.add_argument("--query")
 
-    sub.add_parser("doctor", help="check packages, browser, login, maps, keys and queue "
-                                  "(no model calls, no publishing)")
+    doc = sub.add_parser("doctor", help="check packages, browser, login, maps, keys and queue "
+                                        "(no model calls, no publishing)")
+    doc.add_argument("--sites", help="comma-separated sites to check (default: every site)")
 
     key = sub.add_parser("key", help="store the Anthropic API key in the Windows Credential Manager")
     ksub = key.add_subparsers(dest="key_command", required=True)
@@ -669,7 +670,8 @@ def cmd_doctor(cfg: config.Config, args: argparse.Namespace) -> int:
     from agent_surf import doctor
 
     with Store(cfg.db_path) as store:
-        report = doctor.run_doctor(cfg, store, open_session=BrowserSession)
+        only = [s.strip() for s in args.sites.split(",") if s.strip()] if args.sites else None
+        report = doctor.run_doctor(cfg, store, open_session=BrowserSession, only_sites=only)
     emit(args, report, doctor.format_text(report))
     return EXIT_OK if report["ok"] else EXIT_ERROR
 

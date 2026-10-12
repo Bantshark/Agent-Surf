@@ -59,6 +59,7 @@ class RunResult:
     drift_count: int = 0      # consecutive runs whose fingerprint differs from the learned one
     drift: bool = False       # a drift or health warning was logged this run (advisory only)
     rebaselined: bool = False  # Fix 31: the layout changed with healthy extraction; baseline moved
+    login_state: str | None = None  # Fix 34: logged_in | unknown (sites with account markers)
 
 
 def load_current_map(store: Store, site: str, page_type: str) -> dict:
@@ -272,6 +273,11 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
     ready = wait_for_content(m, page, start_seq, guard)
 
     challenge.ensure_logged_in(page)   # before the first pass: a login wall is not a broken map
+    if sites.logged_in_markers(m["site"]) != sites.LoggedInMarkers():
+        result.login_state, why = challenge.login_state(page)
+        if result.login_state == "unknown":
+            log.warning("login state unknown on %s %s: %s (results may be the logged-out view)",
+                        m["site"], m["page_type"], why)
     click_selectors = list(m.get("click") or [])
 
     def expand() -> int:

@@ -81,6 +81,32 @@ def logged_out_page(page: Any) -> str | None:
         return None
 
 
+def logged_in_reason(page: Any, snapshot: str | None = None) -> str | None:
+    """Fix 34: a positive logged-in marker (account menu / avatar) on the page."""
+    markers = sites.logged_in_markers(_site_name(page))
+    if markers.roles:
+        snap = page.aria_snapshot() if snapshot is None else snapshot
+        for role, name in markers.roles:
+            if re.search(rf'^\s*- {re.escape(role)} "{re.escape(name)}"', snap, re.M):
+                return f'{role} "{name}" is on the page'
+    for tid in markers.testids:
+        if page.count(f'[data-testid="{tid}"]'):
+            return f"{tid} is on the page"
+    return None
+
+
+def login_state(page: Any) -> tuple[str, str]:
+    """("logged_out" | "logged_in" | "unknown", reason). Unknown means no login
+    wall and no account marker: never reported as logged in."""
+    reason = logged_out_page(page)
+    if reason:
+        return "logged_out", reason
+    reason = logged_in_reason(page)
+    if reason:
+        return "logged_in", reason
+    return "unknown", "no login wall and no account marker found"
+
+
 def ensure_logged_in(page: Any) -> None:
     """Raise LoggedOut (no waiting) if the page is a login wall. Used where a
     map would otherwise be called broken or a page sent to the model."""

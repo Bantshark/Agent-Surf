@@ -92,8 +92,11 @@ def home_url(site: str) -> str | None:
     return None
 
 
-def check_login(session: Any, site: str, *, wait_s: float = HOME_WAIT_S) -> Check:
-    """One tab on the site's home page; a login wall fails, a challenge warns."""
+def check_login(session: Any, site: str, *, wait_s: float = HOME_WAIT_S, required: bool = True) -> Check:
+    """One tab on the site's home page. A login wall fails (warns for a site
+    with no maps), a positive account marker is ok (Fix 34), neither is
+    "login state unknown" (warn, never ok), a challenge warns."""
+    bad = FAIL if required else WARN
     url = home_url(site)
     if url is None:
         return Check("logged_in", WARN, "no home page without placeholders to check", site)
@@ -101,16 +104,18 @@ def check_login(session: Any, site: str, *, wait_s: float = HOME_WAIT_S) -> Chec
     try:
         page.goto(url)
         page.wait(wait_s)
-        reason = challenge.logged_out_page(page)
-        if reason:
-            return Check("logged_in", FAIL, f"logged out on {url} ({reason}): log in to {site} in "
-                                            "the Agent Surf browser window", site)
+        state, reason = challenge.login_state(page)
+        if state == "logged_out":
+            return Check("logged_in", bad, f"logged out on {url} ({reason}): log in to {site} in "
+                                           "the Agent Surf browser window", site)
         ch = challenge.detect_page(page)
         if ch:
             return Check("logged_in", WARN, f"challenge on {url} ({ch}); solve it in the browser", site)
-        return Check("logged_in", OK, f"no login wall on {url}", site)
+        if state == "logged_in":
+            return Check("logged_in", OK, f"logged in ({reason})", site)
+        return Check("logged_in", WARN, f"login state unknown on {url}: {reason}", site)
     except Exception as e:
-        return Check("logged_in", FAIL, f"could not open {url} ({type(e).__name__})", site)
+        return Check("logged_in", bad, f"could not open {url} ({type(e).__name__})", site)
     finally:
         try:
             page.close()
@@ -211,24 +216,29 @@ def run_doctor(cfg: config.Config, store: Store, *, env: Any = None,
                open_session: Callable[[str], Any] | None = None,
                http_get: Callable[[str], Any] | None = None,
                version: Callable[[str], str] | None = None,
-               wait_s: float | None = None) -> dict:
+               wait_s: float | None = None, only_sites: list[str] | None = None) -> dict:
     """All checks; ``open_session(endpoint)`` gives a BrowserSession-like
-    context manager (default: the real one)."""
+    context manager (default: the real one). Fix 34: the login state of every
+    registered site is checked (``only_sites`` limits it), one tab each."""
     if open_session is None:
         from agent_surf.browser import BrowserSession as open_session
+    for s in only_sites or []:
+        sites.get_site(s)   # unknown names raise UnknownSite
     checks: list[Check] = [check_packages(version or metadata.version)]
     cdp, endpoint = check_cdp(cfg, http_get)
-    site_names = configured_sites(store)
+    site_names = [s for s in configured_sites(store) if only_sites is None or s in only_sites]
+    login_sites = sorted(only_sites) if only_sites is not None else sorted(sites.SITES)
     if not site_names and cdp.status == FAIL:
         cdp.status = WARN   # nothing configured needs the browser yet
     checks.append(cdp)
-    if site_names and endpoint is not None:
+    if endpoint is not None and login_sites:
         with open_session(endpoint) as session:
-            for site in site_names:
-                checks.append(check_login(session, site,
+            for site in login_sites:
+                checks.append(check_login(session, site, required=site in site_names,
                                           wait_s=HOME_WAIT_S if wait_s is None else wait_s))
-    elif site_names:
-        checks += [Check("logged_in", FAIL, "not checked: no browser", s) for s in site_names]
+    else:
+        checks += [Check("logged_in", FAIL if s in site_names else WARN, "not checked: no browser", s)
+                   for s in login_sites]
     for site in site_names:
         checks += check_maps(store, site)
         checks.append(check_account(store, site))
@@ -246,6 +256,7 @@ def run_doctor(cfg: config.Config, store: Store, *, env: Any = None,
                                            "printed: agent-surf items --undelivered"))
     return {"ok": not any(c.status == FAIL for c in checks),
             "sites": site_names,
+            "login_checked": login_sites,
             "checks": [asdict(c) for c in checks],
             "home": stats,
             "queue": queue}

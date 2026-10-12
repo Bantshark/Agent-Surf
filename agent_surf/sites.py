@@ -201,6 +201,31 @@ HOME_URL: dict[str, str] = {
 }
 
 
+# Fix 34: positive logged-in markers: the account menu/avatar, as accessible
+# (role, name) pairs and data-testid values. A page without a login wall and
+# without any of these has an unknown login state (Reddit's home page, for
+# one, shows no wall when logged out). Guesses to be validated locally.
+@dataclass(frozen=True)
+class LoggedInMarkers:
+    roles: tuple[tuple[str, str], ...] = ()
+    testids: tuple[str, ...] = ()
+
+
+LOGGED_IN: dict[str, LoggedInMarkers] = {
+    "x": LoggedInMarkers((("button", "Account menu"), ("link", "Profile")),
+                         ("SideNav_AccountSwitcher_Button", "AppTabBar_Profile_Link")),
+    "linkedin": LoggedInMarkers((("button", "Me"),)),
+    "reddit": LoggedInMarkers((("button", "Expand user menu"), ("button", "Open profile menu"))),
+    "instagram": LoggedInMarkers((("link", "Profile"),)),
+    "facebook": LoggedInMarkers((("link", "Your profile"), ("button", "Your profile"))),
+    "substack": LoggedInMarkers((("button", "Account"), ("button", "Account menu"), ("link", "Profile"))),
+}
+
+
+def logged_in_markers(site: str) -> LoggedInMarkers:
+    return LOGGED_IN.get(site, LoggedInMarkers())
+
+
 def logged_out_markers(site: str) -> LoggedOutMarkers:
     return LOGGED_OUT.get(site, LoggedOutMarkers())
 
