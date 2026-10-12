@@ -134,6 +134,14 @@ def build_parser() -> argparse.ArgumentParser:
     it.add_argument("--mark-delivered", action="store_true",
                     help="mark the printed items delivered once stdout is flushed")
 
+    st = sub.add_parser("sites", help="list sites; add custom publication domains (Substack)")
+    stsub = st.add_subparsers(dest="sites_command", required=True)
+    stsub.add_parser("list", parents=[common])
+    for name, what in (("add-domain", "allow"), ("remove-domain", "stop allowing")):
+        sp = stsub.add_parser(name, parents=[common], help=f"{what} a custom publication domain")
+        sp.add_argument("site")
+        sp.add_argument("domain")
+
     acct = sub.add_parser("account", help="your own handle per site (for checking unknown outcomes)")
     asub = acct.add_subparsers(dest="account_command", required=True)
     aset = asub.add_parser("set", parents=[common])
@@ -581,6 +589,43 @@ def cmd_purge(cfg: config.Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_sites(cfg: config.Config, args: argparse.Namespace) -> int:
+    """Fix 33. Custom domains are stored in SQLite and loaded on every start."""
+    with Store(cfg.db_path) as store:
+        if args.sites_command == "add-domain":
+            domain = sites.normalize_custom_domain(args.site, args.domain)
+            sites.get_site(args.site)
+            added = store.add_site_domain(args.site, domain)
+            sites.add_site_domains(args.site, [domain])
+            log.info("%s %s for %s", "added" if added else "already allowed:", domain, args.site)
+            emit(args, {"site": args.site, "domain": domain, "added": added})
+            return EXIT_OK
+        if args.sites_command == "remove-domain":
+            removed = store.remove_site_domain(args.site, args.domain.strip().lower().rstrip("."))
+            log.info("%s %s for %s", "removed" if removed else "not a custom domain:", args.domain, args.site)
+            emit(args, {"site": args.site, "domain": args.domain, "removed": removed})
+            return EXIT_OK
+    rows = [{"site": s.name, "domains": list(s.domains), "page_types": sorted(s.page_types),
+             "inbox_page_types": sorted(sites.INBOX_PAGE_TYPES.get(s.name, set())),
+             "actions": sorted(sites.ACTION_START.get(s.name, {}))} for s in sorted(sites.SITES.values(),
+                                                                                  key=lambda s: s.name)]
+    emit(args, rows, "\n".join(f"{r['site']}\t{', '.join(r['domains'])}\t{', '.join(r['page_types'])}"
+                               for r in rows))
+    return EXIT_OK
+
+
+def load_custom_domains(cfg: config.Config) -> None:
+    """Fix 33: custom publication domains (sites add-domain) join the domain lock."""
+    if not cfg.db_path.exists():
+        return
+    with Store(cfg.db_path) as store:
+        for row in store.site_domains():
+            try:
+                sites.add_site_domains(row["site"], [row["domain"]])
+            except (ValueError, sites.UnknownSite) as e:
+                log.warning("ignoring custom domain %s for %s: %s", row["domain"], row["site"], e)
+
+
 def cmd_account(cfg: config.Config, args: argparse.Namespace) -> int:
     from agent_surf import accounts
 
@@ -667,7 +712,7 @@ COMMANDS = {"chrome": cmd_chrome, "learn": cmd_learn, "run": cmd_run, "maps": cm
             "youtube": cmd_youtube, "scrub": cmd_scrub, "learn-action": cmd_learn_action,
             "queue": cmd_queue, "publish": cmd_publish, "dispatch": cmd_dispatch, "inbox": cmd_inbox,
             "receipts": cmd_receipts, "items": cmd_items, "purge": cmd_purge, "account": cmd_account, "actions": cmd_actions,
-            "key": cmd_key, "doctor": cmd_doctor}
+            "key": cmd_key, "doctor": cmd_doctor, "sites": cmd_sites}
 
 
 # Fix 30: commands with a wall-clock budget (budget.py). publish and dispatch
@@ -687,6 +732,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command not in ("chrome", "scrub", "key"):
             cfg.ensure_dirs()
+            load_custom_domains(cfg)
         kind = BUDGETED.get(args.command)
         if kind is None:
             return COMMANDS[args.command](cfg, args)

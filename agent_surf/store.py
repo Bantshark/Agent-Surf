@@ -33,6 +33,13 @@ CREATE TABLE IF NOT EXISTS items (
     data_json TEXT NOT NULL,
     captured_at TEXT NOT NULL
 );
+-- Fix 33: custom publication domains added with `sites add-domain`
+CREATE TABLE IF NOT EXISTS site_domains (
+    site TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    added_at TEXT NOT NULL,
+    PRIMARY KEY (site, domain)
+);
 -- v2: action maps (see actionmap.py), versioned like reading maps
 CREATE TABLE IF NOT EXISTS action_maps (
     site TEXT NOT NULL,
@@ -193,6 +200,25 @@ class Store:
                 " WHERE site = ? AND page_type = ? AND version = ?",
                 (last_fingerprint, drift_count, healthy_runs, baseline, site, page_type, version),
             )
+
+    def add_site_domain(self, site: str, domain: str) -> bool:
+        with self.conn:
+            cur = self.conn.execute("INSERT OR IGNORE INTO site_domains (site, domain, added_at)"
+                                    " VALUES (?, ?, ?)", (site, domain, now_iso()))
+        return cur.rowcount == 1
+
+    def remove_site_domain(self, site: str, domain: str) -> bool:
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM site_domains WHERE site = ? AND domain = ?", (site, domain))
+        return cur.rowcount == 1
+
+    def site_domains(self, site: str | None = None) -> list[sqlite3.Row]:
+        sql = "SELECT site, domain, added_at FROM site_domains"
+        args: tuple = ()
+        if site is not None:
+            sql += " WHERE site = ?"
+            args = (site,)
+        return self.conn.execute(sql + " ORDER BY site, domain", args).fetchall()
 
     def current_map(self, site: str, page_type: str) -> sqlite3.Row | None:
         return self.conn.execute(

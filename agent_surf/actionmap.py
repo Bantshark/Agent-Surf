@@ -37,6 +37,8 @@ COMPOSER_CLICK_LABELS = (
     "Post text", "Add photos or video", "Add photo", "Add media", "Photo/video", "Media", "Image",
     "Start a post", "Create post", "Create", "New post", "Write a comment", "Add a comment",
     "Reply", "Comment", "Message", "Write a message", "Show more",
+    # Fix 33: Substack Notes opens its composer from a prompt (guesses, validate locally).
+    "What's on your mind?", "New note", "Write a note",
 )
 CLICK_LABELS = {action: COMPOSER_CLICK_LABELS for action in ("post", "reply", "comment", "dm")}
 DISCARD_CLICK_LABELS = ("Discard", "Discard post", "Don't save", "Close", "Cancel", "Not now", "Dismiss",

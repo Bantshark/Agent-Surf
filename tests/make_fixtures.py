@@ -374,7 +374,11 @@ function render() {
 if (cfg.overlay) {
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('overlay')) $('overlay').remove(); });
 }
-if (cfg.late_ms) setTimeout(render, cfg.late_ms); else render();
+if (cfg.opener) {
+  // Fix 33: a Substack Notes-like prompt that opens the composer when clicked.
+  $('app').innerHTML = '<button type="button" id="open">What\u2019s on your mind?</button>';
+  $('open').addEventListener('click', render);
+} else if (cfg.late_ms) setTimeout(render, cfg.late_ms); else render();
 """
 
 INJECTION_HTML = (
@@ -387,9 +391,9 @@ OVERLAY_HTML = ('<div id="overlay" role="dialog" aria-label="Turn on notificatio
 
 
 def compose_page(editor="input", media="hidden", overlay=False, late_ms=0, injection=False,
-                 media_only=False):
+                 media_only=False, opener=False):
     cfg = json.dumps({"editor": editor, "media": media, "overlay": overlay, "late_ms": late_ms,
-                      "media_only": media_only})
+                      "media_only": media_only, "opener": opener})
     return ('<!doctype html><html><head><meta charset="utf-8"><title>Compose Test</title>'
             '<style>#editor{min-height:60px;border:1px solid #888}</style></head><body><main>'
             '<h1>Compose</h1>' + (INJECTION_HTML if injection else '') + '<div id="app"></div></main>'
@@ -499,6 +503,7 @@ COMPOSE_PAGES = {
     "/compose-late": compose_page(late_ms=3000),
     "/compose-injection": compose_page(injection=True),
     "/compose-media-only": compose_page(media_only=True),   # Post enables only with media
+    "/compose-notes": compose_page(opener=True),   # Fix 33: Substack Notes-style prompt
     "/compose-modal": modal_page(inline="now"),
     "/compose-modal-only": modal_page(),
     "/compose-scoped": modal_page(extras=True),

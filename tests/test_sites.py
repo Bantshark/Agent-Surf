@@ -20,7 +20,7 @@ def test_initial_registry():
 def test_inbox_page_types():
     assert sites.INBOX_PAGE_TYPES == {
         "x": {"notifications", "messages"}, "instagram": {"messages"}, "facebook": {"notifications"},
-        "linkedin": {"notifications", "messages"}, "reddit": {"inbox"}}
+        "linkedin": {"notifications", "messages"}, "reddit": {"inbox"}, "substack": {"notifications"}}
     for site, types in sites.INBOX_PAGE_TYPES.items():
         for t in types:
             sites.check_url(site, sites.build_url(site, t))
