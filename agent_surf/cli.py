@@ -60,6 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
     show = msub.add_parser("show", parents=[common])
     show.add_argument("site")
     show.add_argument("page_type")
+    rb = msub.add_parser("rebaseline", parents=[common],
+                         help="store the current page's layout fingerprint as the map's baseline "
+                              "(one tab, no model call)")
+    target_args(rb)
 
     yt = sub.add_parser("youtube", help="YouTube metadata, subtitles, comments via yt-dlp")
     yt.add_argument("target", help="YouTube URL or ytsearchN:query")
@@ -311,6 +315,22 @@ def cmd_maps(cfg: config.Config, args: argparse.Namespace) -> int:
                 log.info("no maps yet; run: agent-surf learn <site> <page_type>")
             emit(args, rows, "\n".join(f"{r['site']}\t{r['page_type']}\tv{r['version']}\t{r['created_at']}"
                                        f"\t{r['path']}" for r in rows) or None)
+            return EXIT_OK
+        if args.maps_command == "rebaseline":
+            from agent_surf import runner
+
+            site = sites.get_site(args.site)
+            sites.build_url(args.site, args.page_type, query=args.query, handle=args.handle)
+            runner.load_current_map(store, args.site, args.page_type)   # refuse before touching Chrome
+            with BrowserSession(cdp_endpoint(cfg)) as session:
+                try:
+                    out = runner.rebaseline(store, session.new_page(site), args.site, args.page_type,
+                                            query=args.query, handle=args.handle,
+                                            guard=challenge.make_guard())
+                except runner.MapBroken as e:
+                    log.error("%s", e.reason)
+                    return EXIT_MAP_BROKEN
+            emit(args, out, f"{out['site']} {out['page_type']} v{out['version']}: baseline updated")
             return EXIT_OK
         row = store.current_map(args.site, args.page_type)
         if row is None:

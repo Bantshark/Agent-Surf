@@ -54,19 +54,38 @@ def test_content_changes_never_warn(store, har_page, learned, caplog):
         assert not result.drift and warnings == [], (variant, warnings)
 
 
-def test_structural_change_warns_after_threshold(store, har_page, learned, caplog):
+def test_healthy_structural_change_rebaselines_after_threshold(store, har_page, learned, caplog):
+    """Fix 31: a layout change with healthy extraction moves the baseline once
+    the streak reaches DRIFT_RUNS, instead of warning forever."""
     for n in (1, 2):
         result, warnings = run(store, har_page, "redesign", caplog)
         assert result.drift_count == n and not result.drift and warnings == []
         assert result.stop_reason == "max_scrolls"  # never blocks the run
-    result, warnings = run(store, har_page, "redesign", caplog)
-    assert result.drift and result.drift_count == runner.DRIFT_RUNS
-    assert any("layout drift" in w and "3 runs in a row" in w for w in warnings)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="agent_surf.runner"):
+        result = runner.run(store, har_page("drift.har", DRIFT_SITE), "drifttest", "feed", handle="redesign")
+    assert result.rebaselined and not result.drift and result.drift_count == 0
+    assert "layout changed but extraction is healthy; baseline updated" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     row = store.current_map("drifttest", "feed")
-    assert row["drift_count"] == 3 and row["last_fingerprint"] == result.fingerprint
-    # The old layout returning resets the streak.
-    result, warnings = run(store, har_page, "base", caplog)
+    assert row["fingerprint"] == result.fingerprint and row["drift_count"] == 0
+    # The new layout is now the baseline: no streak at all ...
+    result, warnings = run(store, har_page, "redesign", caplog)
     assert result.drift_count == 0 and warnings == []
+    # ... and the old one counts as a change.
+    result, warnings = run(store, har_page, "base", caplog)
+    assert result.drift_count == 1 and warnings == []
+
+
+def test_structural_change_with_health_problem_warns_and_keeps_baseline(store, har_page, learned, caplog):
+    before = store.current_map("drifttest", "feed")["fingerprint"]
+    for variant in ("redesign", "redesign-sparse", "redesign"):
+        result, warnings = run(store, har_page, variant, caplog)
+    assert result.drift and result.drift_count == runner.DRIFT_RUNS and not result.rebaselined
+    assert any("layout drift" in w and "3 runs in a row" in w and "health problem" in w for w in warnings)
+    row = store.current_map("drifttest", "feed")
+    assert row["fingerprint"] == before and row["drift_count"] == 3
+    assert row["last_fingerprint"] == result.fingerprint
 
 
 def test_interrupted_streak_does_not_warn(store, har_page, learned, caplog):
@@ -134,3 +153,42 @@ def test_existing_db_migrates_and_old_fingerprint_is_rebaselined(har_page, tmp_p
         assert store.current_map("drifttest", "feed")["fingerprint"] == result.fingerprint
     with Store(db):  # reopening an already-migrated DB is a no-op
         pass
+
+
+def test_rebaseline_command(tmp_path, monkeypatch, capsys, har_page, caplog):
+    """Fix 31: maps rebaseline stores the current page's fingerprint; one tab, no model."""
+    from agent_surf import cli
+    from test_cli import FakeSession
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("AGENT_SURF_HOME", str(home))
+    path = sitemap.save_map(home / "maps", dict(DRIFT_MAP, fingerprint="v2-sha256-stale"))
+    with Store(home / "surf.db") as s:
+        s.add_map("drifttest", "feed", 1, path, "v2-sha256-stale", dry_run_items=4)
+        s.update_drift("drifttest", "feed", 1, last_fingerprint="x", drift_count=8)
+    opened = []
+
+    class Session(FakeSession):
+        def new_page(self, site):
+            opened.append(site.name)
+            return har_page("drift.har", DRIFT_SITE)
+
+    monkeypatch.setattr(cli, "BrowserSession", Session(None))
+    monkeypatch.setattr(cli, "make_client", lambda cfg: pytest.fail("no model client"))
+    assert cli.main(["maps", "rebaseline", "drifttest", "feed", "--handle", "redesign", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["fingerprint"].startswith(sitemap.FINGERPRINT_PREFIX) and out["items_on_page"] == 4
+    assert opened == ["drifttest"]
+    with Store(home / "surf.db") as s:
+        row = s.current_map("drifttest", "feed")
+        assert row["fingerprint"] == out["fingerprint"] and row["drift_count"] == 0
+        result = runner.run(s, har_page("drift.har", DRIFT_SITE), "drifttest", "feed", handle="redesign")
+        assert result.drift_count == 0
+    # a page the map extracts nothing from is never baselined
+    with Store(home / "surf.db") as s:
+        empty = har_page("drift.har", DRIFT_SITE)
+        empty._page.route("**/drift/empty", lambda r: r.fulfill(
+            status=200, content_type="text/html", body="<main><h1>Feed</h1></main>"))
+        with pytest.raises(runner.MapBroken, match="not rebaselined"):
+            runner.rebaseline(s, empty, "drifttest", "feed", handle="empty")
+        assert s.current_map("drifttest", "feed")["fingerprint"] == out["fingerprint"]

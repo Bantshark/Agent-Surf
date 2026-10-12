@@ -122,13 +122,15 @@ def test_map_broken_when_required_field_missing(store, har_page, tmp_path):
         runner.run(store, har_page("feed.har"), "feedtest", "home")
 
 
-def test_fingerprint_drift_is_reported_not_blocking(store, har_page, tmp_path):
+def test_fingerprint_drift_is_not_blocking_and_rebaselines_when_healthy(store, har_page, tmp_path):
     save(store, tmp_path, make_map(fingerprint=sitemap.FINGERPRINT_PREFIX + "stale"))
     for _ in range(runner.DRIFT_RUNS - 1):
         assert runner.run(store, har_page("feed.har"), "feedtest", "home").drift is False
     result = runner.run(store, har_page("feed.har"), "feedtest", "home")
-    assert result.drift is True
+    # Fix 31: extraction was healthy on every drifted run, so the baseline moves
+    assert result.rebaselined is True and result.drift is False
     assert result.stop_reason == "stop_after_seen"  # the run itself went ahead
+    assert store.current_map("feedtest", "home")["fingerprint"] == result.fingerprint
 
 
 def test_guard_called_after_navigation_and_each_scroll(store, har_page, tmp_path):

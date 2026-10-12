@@ -90,6 +90,7 @@ MAPS_ADDED_COLUMNS = {
     "dry_run_items": "INTEGER",          # items the learner's dry run found before scrolling
     "last_fingerprint": "TEXT",          # fingerprint seen on the latest run
     "drift_count": "INTEGER NOT NULL DEFAULT 0",  # consecutive runs whose fingerprint differed
+    "healthy_drift_runs": "INTEGER NOT NULL DEFAULT 0",  # Fix 31: ...of which extraction was healthy
 }
 
 
@@ -181,16 +182,16 @@ class Store:
         ).fetchone()
 
     def update_drift(self, site: str, page_type: str, version: int, *, last_fingerprint: str,
-                     drift_count: int, baseline: str | None = None) -> None:
-        """Record the latest run's fingerprint and mismatch streak. ``baseline``
-        replaces the stored fingerprint (used when the stored one is from an
-        older fingerprint scheme)."""
+                     drift_count: int, baseline: str | None = None, healthy_runs: int = 0) -> None:
+        """Record the latest run's fingerprint and mismatch streak (and how many
+        of those runs extracted healthily). ``baseline`` replaces the stored
+        fingerprint (an older fingerprint scheme, or a rebaseline)."""
         with self.conn:
             self.conn.execute(
-                "UPDATE maps SET last_fingerprint = ?, drift_count = ?,"
+                "UPDATE maps SET last_fingerprint = ?, drift_count = ?, healthy_drift_runs = ?,"
                 " fingerprint = COALESCE(?, fingerprint)"
                 " WHERE site = ? AND page_type = ? AND version = ?",
-                (last_fingerprint, drift_count, baseline, site, page_type, version),
+                (last_fingerprint, drift_count, healthy_runs, baseline, site, page_type, version),
             )
 
     def current_map(self, site: str, page_type: str) -> sqlite3.Row | None:

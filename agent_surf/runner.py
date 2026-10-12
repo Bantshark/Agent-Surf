@@ -58,6 +58,7 @@ class RunResult:
     fingerprint: str | None = None
     drift_count: int = 0      # consecutive runs whose fingerprint differs from the learned one
     drift: bool = False       # a drift or health warning was logged this run (advisory only)
+    rebaselined: bool = False  # Fix 31: the layout changed with healthy extraction; baseline moved
 
 
 def load_current_map(store: Store, site: str, page_type: str) -> dict:
@@ -86,20 +87,31 @@ def required_for(m: dict, source: str) -> list[str]:
     return [r for r in m["required_fields"] if r in fields]
 
 
-def track_drift(store: Store, m: dict, fp: str) -> int:
-    """Update the per-map mismatch streak and return it. A stored fingerprint
-    from an older scheme is replaced by this run's (no warning)."""
+def track_drift(store: Store, m: dict, fp: str, *, healthy: bool = True) -> tuple[int, bool]:
+    """Update the per-map mismatch streak; return (streak, rebaselined). A
+    stored fingerprint from an older scheme is replaced by this run's (no
+    warning). Fix 31: when the streak reaches DRIFT_RUNS and extraction was
+    healthy on each of those runs, the layout changed but the map still works:
+    this run's fingerprint becomes the baseline and the streak resets."""
     row = store.map_row(m["site"], m["page_type"], m["version"]) if "version" in m else None
     if row is None:
-        return 0
+        return 0, False
+    site, page_type, version = m["site"], m["page_type"], m["version"]
     baseline = row["fingerprint"]
     if not baseline or not baseline.startswith(sitemap.FINGERPRINT_PREFIX):
-        store.update_drift(m["site"], m["page_type"], m["version"], last_fingerprint=fp,
-                           drift_count=0, baseline=fp)
-        return 0
-    count = 0 if fp == baseline else (row["drift_count"] or 0) + 1
-    store.update_drift(m["site"], m["page_type"], m["version"], last_fingerprint=fp, drift_count=count)
-    return count
+        store.update_drift(site, page_type, version, last_fingerprint=fp, drift_count=0, baseline=fp)
+        return 0, False
+    if fp == baseline:
+        store.update_drift(site, page_type, version, last_fingerprint=fp, drift_count=0)
+        return 0, False
+    count = (row["drift_count"] or 0) + 1
+    healthy_runs = ((row["healthy_drift_runs"] or 0) + 1) if healthy else 0
+    if count >= DRIFT_RUNS and healthy_runs >= DRIFT_RUNS:
+        store.update_drift(site, page_type, version, last_fingerprint=fp, drift_count=0, baseline=fp)
+        return 0, True
+    store.update_drift(site, page_type, version, last_fingerprint=fp, drift_count=count,
+                       healthy_runs=healthy_runs)
+    return count, False
 
 
 def health_problems(batch: list[dict], required: list[str], dry_run_items: int | None) -> list[str]:
@@ -185,6 +197,40 @@ def no_results(m: dict, page: ReadOnlyPage, *, quiet: bool) -> str | None:
         if empty and has_main:
             return "the results area is present but empty"
     return None
+
+
+def rebaseline(store: Store, page: ReadOnlyPage, site: str, page_type: str, *,
+               query: str | None = None, handle: str | None = None, guard: Guard | None = None) -> dict:
+    """Fix 31: store the current page's fingerprint as the map's baseline. One
+    tab, no model call, nothing stored but the fingerprint. Refuses a login
+    wall, a no-results page or a page the map extracts nothing from."""
+    guard = guard or (lambda p: None)
+    m = load_current_map(store, site, page_type)
+    url = sites.build_url(site, page_type, query=query, handle=handle)
+    start = page.buffer.last_seq
+    page.goto(url)
+    guard(page)
+    page.wait(m["scroll"]["delay_s"])
+    guard(page)
+    wait_for_content(m, page, start, guard)
+    challenge.ensure_logged_in(page)
+    fp = sitemap.fingerprint(page.aria_snapshot())
+    sources = [m["source"]] + [s for s in sitemap.SOURCES if s != m["source"] and s in m]
+    found = 0
+    for source in sources:
+        responses = page.buffer.since(start) if source in sitemap.STREAM_SOURCES else None
+        found = sum(1 for it in extract_items(m, source, page, responses) if it["item_id"])
+        if found:
+            break
+    if not found:
+        empty = noresults.marker_reason(page)
+        what = f"shows no results ({empty})" if empty else "gives no items with this map"
+        raise MapBroken(f"the page {what}; not rebaselined (try another query, or relearn)", m)
+    store.update_drift(site, page_type, m["version"], last_fingerprint=fp, drift_count=0, baseline=fp)
+    log.info("%s %s v%d: baseline updated from %s (%d item(s) on the page)", site, page_type,
+             m["version"], url, found)
+    return {"site": site, "page_type": page_type, "version": m["version"], "fingerprint": fp,
+            "items_on_page": found}
 
 
 def run(store: Store, page: ReadOnlyPage, site: str, page_type: str, *,
@@ -295,13 +341,18 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
                         return result
                 raise MapBroken(broken, m)
             result.source = chosen
-            result.drift_count = track_drift(store, m, result.fingerprint)
-            if result.drift_count >= DRIFT_RUNS:
-                result.drift = True
-                log.warning("layout drift on %s %s: page structure has differed from when the map "
-                            "was learned for %d runs in a row", site, page_type, result.drift_count)
             row = store.map_row(site, page_type, m["version"]) if "version" in m else None
             problems = health_problems(batch, required, row["dry_run_items"] if row else None)
+            result.drift_count, result.rebaselined = track_drift(store, m, result.fingerprint,
+                                                                 healthy=not problems)
+            if result.rebaselined:
+                log.info("layout changed but extraction is healthy; baseline updated (%s %s)",
+                         site, page_type)
+            elif result.drift_count >= DRIFT_RUNS:
+                result.drift = True
+                log.warning("layout drift on %s %s: page structure has differed from when the map "
+                            "was learned for %d runs in a row, with an extraction health problem "
+                            "on at least one of them", site, page_type, result.drift_count)
             if problems:
                 result.drift = True
                 log.warning("extraction health dropped on %s %s: %s", site, page_type,

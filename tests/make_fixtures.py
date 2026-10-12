@@ -286,6 +286,8 @@ DRIFT_PAGES = {
     # Health drops: far fewer items; most items missing the required field.
     "/drift/sparse": drift_page([("d1", "Post 1")], [TRENDS]),
     "/drift/fieldless": drift_page([("d1", "Post 1")] + [(f"d{i}", None) for i in range(2, 5)], [TRENDS]),
+    # Fix 31: a structural change together with a health drop.
+    "/drift/redesign-sparse": drift_page([("d1", "Post 1")], [TRENDS], landmarks=False),
 }
 
 
