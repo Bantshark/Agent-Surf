@@ -560,6 +560,92 @@ issues were fixed on branch `claude/validate-fixes`:
     publishing. Exit 0 when nothing required failed, else 1. Tests:
     `test_doctor.py`.
 
+29. **An empty result page looked like a broken map** (local validation: a
+    search with zero matching posts exited 4; with a key it would have paid
+    for a relearn of a healthy map). Change: per-site "no results" markers
+    (`sites.NO_RESULTS`: URL path, title, accessibility text, data-testid;
+    guesses, data only) and `noresults.py`. Before MapBroken on a first pass
+    without ids, a marker, or on a search page (`--query`) a quiet page whose
+    `main` landmark is present but empty, ends the run with 0 items and
+    stop_reason `no_results` (exit 0, no relearn, no model call, not counted
+    as drift). A missing structure (no `main`) or a `main` full of content the
+    map no longer matches stays MapBroken. `learn` and `learn-action` refuse a
+    no-results or empty page ("nothing to learn from") before the model call.
+    `ReadOnlyPage.count(selector)` is a new pure read. Tests:
+    `test_no_results.py`, `test_cold_start.py`.
+30. **A dead tab or a sleeping machine crashed or hung a run** (local
+    validation: an uncaught TargetClosedError traceback; a run hung two hours
+    across a sleep). Change: `browser.BrowserClosed` ("the browser tab or
+    Chrome closed during the run; rerun") replaces closed-target errors in
+    every read, navigation, scroll and wait; the CLI maps any remaining one to
+    exit 1 without a traceback; a rehearsal on a dead tab is not a bad map.
+    Publishing: closed or out of time before the submit click puts the item
+    back to approved with last_error, after it the unknown-outcome path.
+    `budget.py`: wall-clock budgets (run/inbox 900 s, learn/learn-action
+    1200 s, publish 600 s per item; `AGENT_SURF_MAX_RUN_S`, `_LEARN_S`,
+    `_PUBLISH_S`) checked in every wait, scroll and step, plus sleep detection
+    (wall clock more than 60 s ahead of the monotonic clock between checks).
+    A run stops with what it captured (stop_reason `time_budget` or
+    `machine_slept`; recoverable via Fix 21); learn fails without saving;
+    checks are suspended after a submit. Tests: `test_dead_tab_budget.py`.
+31. **Drift baseline went stale** (local validation: "layout drift on x
+    search ... 8 runs in a row" with 59-60 items per run). Change: maps gain
+    `healthy_drift_runs` (additive). When the drift streak reaches DRIFT_RUNS
+    and extraction was healthy on each of those runs, the current fingerprint
+    becomes the baseline once ("layout changed but extraction is healthy;
+    baseline updated") and the streak resets; the warning remains only for a
+    streak with a health problem. `maps rebaseline <site> <page_type>
+    [--query|--handle]` stores the current page's fingerprint (one tab, no
+    model call; refuses a login wall or a page the map extracts nothing
+    from). Tests: `test_drift.py`.
+32. **YouTube subtitles came back empty** (local validation: metadata and
+    comments fine, `subtitles` empty, "No video formats found"). Cause: the
+    Fix 3 decision `player_skip: js` keeps caption tracks from resolving.
+    Change: `--subs` runs yt-dlp's normal extraction with the Node runtime
+    (still `skip_download`, never `remote_components`), picks manual
+    subtitles in `--sub-lang` (default en), else automatic captions, fetches
+    the VTT through yt-dlp's own opener (youtube.com hosts only) and returns
+    plain text with `subtitles_status`: "ok" | "none_available" |
+    "failed: <reason>" (plus `subtitles_lang`, `subtitles_kind`); metadata and
+    comments keep `player_skip`. Video targets set `noplaylist`; searches and
+    `/playlist` URLs (new page type `playlist`) cap at `playlistend`.
+    `upload_date` is ISO (YYYY-MM-DD). Tests: `test_youtube.py`.
+33. **Substack** (new site). Change: `substack` (substack.com and every
+    *.substack.com; look-alikes refused) with page types `publication`
+    (subdomain-validated handle), `post` (a validated post URL as --handle),
+    `notes`, `search`, `profile`, inbox `notifications`; actions `post`
+    (Notes, composer on substack.com/notes) and `comment` (--target), media
+    optional; Notes prompt labels added to the composer click list; logged-out
+    and no-results markers. `sites add-domain|remove-domain|list`: custom
+    publication domains in SQLite (table `site_domains`, additive), loaded
+    into the domain lock on every start; only for Substack, never wildcards,
+    IPs or another site's domain. Newsletter posts and email sends are out of
+    scope. Tests: `test_substack.py`.
+34. **doctor only checked sites with maps; Reddit shows no login wall**
+    (local validation). Change: `doctor` checks the login state of every
+    registered site (one tab each, closed; `--sites a,b` limits it) and
+    positive logged-in markers (`sites.LOGGED_IN`: account menu/avatar as
+    role+name or testid; guesses): a wall fails (warns for a site without
+    maps), a marker is ok, neither is "login state unknown" (warn, never ok).
+    Runs on sites with markers log the unknown state too. Tests:
+    `test_doctor.py`.
+35. **Recorded review findings** (all of them). Change: domain check after
+    the first-pass click; model-written `url_regex` refused with nested
+    quantifiers or over 300 characters and matched against the first 2,000
+    characters of a URL everywhere it runs; UTF-8 for every map, JSON and
+    DevToolsActivePort file; HAR scrub redacts fragment parameters,
+    token-shaped path segments and bearer/JWT values under any name, replaces
+    only redacted query values, and no longer treats `author` as `auth`;
+    AGENT_SURF_HOME, maps, debug and media folders 0700 on POSIX; an invalid
+    action map refuses publish with exit 5 (before Chrome); `queue approve
+    --all-drafts` needs `--yes` (else lists the drafts, exit 2); `--json`
+    before a nested subcommand works (SUPPRESS defaults). The order-dependent
+    test exposed a real leak: a failing log handler printed the exception being
+    handled, whose message held the Telegram URL with the token; the failure
+    is now logged outside the except block, and a conftest fixture restores
+    logging state after every test; a test runs the two modules in both
+    orders. Tests: `test_review_findings.py`.
+
 ## Agent Surf v2: the write layer
 Built on branch `claude/agent-surf-v2` (base `claude/cold-start-fix`, so the
 cold-start wait of Fix 5/6 is already in). v1 learns a page once and replays it
@@ -699,7 +785,14 @@ DevToolsActivePort attach against a real Chrome 144+ profile; every real
 site's composer (no action map has been learned against a live site); the
 default composer URLs in `sites.ACTION_START`; live WebSocket inboxes; real
 GraphQL create responses and permalinks; account lookup through real
-profile pages. All of this needs local live validation.
+profile pages. All of this needs local live validation. Since round 5 also:
+the no-results markers (`sites.NO_RESULTS`), the positive logged-in markers
+(`sites.LOGGED_IN`) and the Substack logged-out markers; every Substack URL
+template (`notes`, `search`, `profile`, `/activity` as inbox), its Notes
+composer labels and `sites.HOME_URL["substack"]`; the YouTube subtitle path
+(player JS through Node, VTT through yt-dlp's opener). (Live already: X
+search and post maps, the X login markers via doctor, LinkedIn's /login
+marker, Fix 21 recovery after a sleep.)
 
 ### Known gaps after hardening
 - Encryption at rest: `$AGENT_SURF_HOME` (queue text, receipts, debug folders,
@@ -721,38 +814,24 @@ Fixed:
 - har_scrub.py: HAR read/written without an explicit encoding: Fix 23.
 - executor.py: names from aria-labelledby not resolved: Fix 25.
 
-Not fixed (file:line on branch `claude/v2-polish`; recommendation):
-- runner.py:213: no `page.check_domain()` after the first-pass `expand()`
-  (the scroll loop has one). A click that navigates off-site raises inside
-  `expand()` already; add the check anyway for symmetry.
-- sitemap.py:169, sitemap.py:313, runner.py:120, publisher.py:89,
-  executor.py:152: model-written `url_regex` is compiled and run on every
-  response URL; a catastrophic pattern could stall a run (ReDoS). Reject
-  nested quantifiers in validate_map/validate_action_map, cap the pattern
-  length, and only search URLs up to a fixed length.
-- sitemap.py:404, sitemap.py:411, actionmap.py:354, actionmap.py:364,
-  browser.py:358: maps (and DevToolsActivePort) are read/written without
-  `encoding="utf-8"`; on Windows the locale code page is used. Pass the
-  encoding explicitly (existing files are ASCII-only JSON, so this is safe).
-- youtube.py:76 and youtube.py:171: any youtube.com URL is a "video"; a
-  playlist or `&list=` URL extracts every entry. Set `noplaylist: True` for
-  video targets and a `playlistend` cap.
-- har_scrub.py:75: URL fragments and path segments are not redacted (tokens
-  in `#access_token=` or `/reset/<token>`); `urlencode` re-encodes the whole
-  query when one parameter is redacted. Redact fragment parameters with the
-  same pattern; rebuild the query by replacing only the redacted values.
-- har_scrub.py:71/137: values are redacted by name only; a `Bearer ...` or
-  JWT-shaped value under an innocuous name survives. Add value patterns
-  (Bearer, three base64url segments) to the scrub, not only the guard.
-- config.py:45 (ensure_dirs) and store.py:119: AGENT_SURF_HOME is created
-  with the default umask, not 0700. Create it with mode 0o700 (POSIX).
-- cli.py:441: an invalid current action map raises ActionMapError (a
-  ValueError) and exits 1, not 5 (refused, not attempted). Catch it in
-  cmd_publish and exit 5.
-- cli.py:426: `queue approve --all-drafts` approves drafts the user has not
-  looked at. Require `--yes` or list them and ask.
-- cli.py:42: `--json` given before a nested subcommand (`queue --json list`)
-  is overridden by the nested parser's default. Use
-  `argparse.SUPPRESS` defaults on the nested parsers.
-- har_scrub.py (keep-bodies): the credential pattern `auth` also matches
-  keys like `author`, which are redacted; harmless over-redaction.
+Fixed in round 5 (`claude/v2-round5`):
+- runner.py: no `check_domain()` after the first-pass `expand()`: Fix 35.
+- sitemap/runner/publisher/executor: ReDoS on model-written `url_regex`:
+  Fix 35 (nested quantifiers and > 300 chars refused; URLs searched up to
+  2,000 chars).
+- sitemap/actionmap/browser: map and DevToolsActivePort files without
+  `encoding="utf-8"`: Fix 35.
+- youtube.py: playlists and `&list=` URLs expanded everything: Fix 32
+  (`noplaylist`, `playlistend`).
+- har_scrub.py: fragments and path tokens not redacted; whole query
+  re-encoded: Fix 35.
+- har_scrub.py: bearer/JWT values under innocuous names: Fix 35.
+- config.py/store.py: AGENT_SURF_HOME not 0700: Fix 35.
+- cli.py: invalid action map exited 1 instead of 5: Fix 35.
+- cli.py: `queue approve --all-drafts` without review: Fix 35 (`--yes`).
+- cli.py: `--json` before a nested subcommand ignored: Fix 35.
+- har_scrub.py: `author` over-redacted as `auth`: Fix 35.
+- tests: order-dependent `test_telegram_failure_never_leaks_token` (and the
+  token leak through a failing log handler behind it): Fix 35.
+
+Not fixed: none recorded.

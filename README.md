@@ -23,11 +23,12 @@ There is no install step; run it as a module from the repo root.
 python -m agent_surf chrome                         # print the Chrome launch command
 python -m agent_surf learn <site> <page_type> [--query Q | --handle H]
 python -m agent_surf run   <site> <page_type> [--query Q | --handle H] [--json]
-python -m agent_surf maps  list | show <site> <page_type>
-python -m agent_surf youtube <url-or-ytsearchN:query> [--subs] [--comments] [--json]
+python -m agent_surf maps  list | show <site> <page_type> | rebaseline <site> <page_type> [--query Q | --handle H]
+python -m agent_surf youtube <url-or-ytsearchN:query> [--subs [--sub-lang en]] [--comments] [--json]
 python -m agent_surf items [--site S] [--page-type P] [--run RUN_ID | --since ISO8601 | --undelivered] [--json] [--mark-delivered]
 python -m agent_surf scrub <in.har> <out.har> [--keep-bodies]
-python -m agent_surf doctor [--json]
+python -m agent_surf doctor [--sites x,linkedin] [--json]
+python -m agent_surf sites list | add-domain substack <domain> | remove-domain substack <domain>
 python -m agent_surf key set | key clear              # Windows: Anthropic key in the Credential Manager
 ```
 
@@ -41,11 +42,35 @@ python -m agent_surf key set | key clear              # Windows: Anthropic key i
 3. `run` replays the map with no model calls and prints only items not seen
    before. If the map breaks and an Anthropic key is available, it relearns once.
 4. `doctor` checks everything a run needs, without model calls or publishing:
-   pinned packages, the browser (loopback CDP), that each site with a map is
-   logged in (one tab on its home page, closed again), that maps validate,
-   lookups, account handles, Telegram and the Anthropic key (presence and
-   source only), data size and queue counts. Exit 0 when nothing required
-   failed, else 1.
+   pinned packages, the browser (loopback CDP), the login state of every site
+   (one tab on its home page, closed again; `--sites x,linkedin` limits it),
+   that maps validate, lookups, account handles, Telegram and the Anthropic
+   key (presence and source only), data size and queue counts. Login is "ok"
+   only when an account marker (menu/avatar) is seen; a login wall fails (or
+   warns, for a site you have no maps for) and neither is "login state
+   unknown" (warn). Exit 0 when nothing required failed, else 1.
+
+**No results is not broken.** A search with no matches (the site's own
+"no results" marker, or an empty results area on a search page) prints
+nothing and exits 0 with stop reason `no_results`: no relearn and no Claude
+call. `learn` refuses such a page ("nothing to learn from"). Only a page whose
+structure is gone counts as a broken map.
+
+**Budgets and sleep.** `run`/`inbox` stop after 15 min, `learn`/`learn-action`
+after 20 min and each publish after 10 min (`AGENT_SURF_MAX_RUN_S`,
+`AGENT_SURF_MAX_LEARN_S`, `AGENT_SURF_MAX_PUBLISH_S`). If the machine sleeps
+mid-run (the wall clock jumps past the monotonic clock) the run stops too. A
+stopped run prints what it captured (stop reason `time_budget` or
+`machine_slept`); anything not printed is in `items --undelivered`. A closed
+tab or Chrome ends the command with "the browser tab or Chrome closed during
+the run; rerun" (exit 1, no traceback); a publish that had not reached the
+Post click stays approved.
+
+**Layout drift.** When a site changes its layout but the map still extracts
+healthily for 3 runs in a row, the new layout becomes the baseline
+automatically ("baseline updated"). The drift warning only stays when
+extraction also suffered. `maps rebaseline <site> <page_type>` does it by
+hand (one tab, no Claude call).
 
 **Never losing items.** `run`, `inbox` and `youtube` print `run_id=...` on
 stderr and stamp it on every item they store. An item counts as delivered only
@@ -75,18 +100,28 @@ Sites and page types:
 | `instagram` | `profile` (`--handle`), `feed` |
 | `facebook` | `page` (`--handle`), `feed` |
 | `linkedin` | `profile` (`--handle`), `feed`, `jobs` (`--query`) |
+| `substack` | `publication` (`--handle` = subdomain), `post` (`--handle` = post URL), `notes`, `search` (`--query`), `profile` (`--handle`) |
 
 Inbox page types (v2, read with `inbox`): `x` `notifications`, `messages`;
 `instagram` `messages`; `facebook` `notifications`; `linkedin`
-`notifications`, `messages`; `reddit` `inbox`.
+`notifications`, `messages`; `reddit` `inbox`; `substack` `notifications`.
+
+**Substack** works like the others, through your logged-in browser: any
+`<name>.substack.com` is allowed; a publication on its own domain must be added
+first with `sites add-domain substack <domain>` (stored locally, no wildcards).
+Publishing covers Notes (`learn-action substack post`, composer on
+substack.com/notes) and comments (`--target <post URL>`); newsletter posts and
+email sends are out of scope.
 
 Results go to stdout (every command accepts `--json`); logs go to stderr.
 Exit codes: `0` ok, `1` error, `2` usage, `3` CAPTCHA not cleared within 10
 minutes, `4` map broken and no API key to relearn, `5` publish refused (not
 attempted: not approved, content changed since approval, no action map, or a
-cap), `6` publish needs attention (attempted but not confirmed published; see
-`queue show <id>`), `7` logged out (no login within 10 minutes; nothing was
-relearned or sent to Claude, and a queue item stays approved).
+cap, or an invalid action map), `6` publish needs attention (attempted but not
+confirmed published; see `queue show <id>`), `7` logged out (no login within 10
+minutes; nothing was relearned or sent to Claude, and a queue item stays
+approved). `queue approve --all-drafts` without `--yes` lists the drafts and
+exits 2. A run that finds no results exits 0.
 
 Environment:
 
@@ -106,7 +141,7 @@ Environment:
 ```
 python -m agent_surf learn-action <site> post|reply|dm|comment [--target URL | --thread URL | --start URL] [--keep-debug]
 python -m agent_surf queue add <site> <action> [--text T] [--media F ...] [--target URL] [--thread URL] [--at ISO8601] [--missed skip|run|ask]
-python -m agent_surf queue list [--status S] | show <id> | approve <id> | approve --all-drafts | reject <id>
+python -m agent_surf queue list [--status S] | show <id> | approve <id> | approve --all-drafts --yes | reject <id>
 python -m agent_surf publish <id>
 python -m agent_surf dispatch [--once] [--stderr-only]
 python -m agent_surf inbox <site> <page_type> [--json]
@@ -194,7 +229,9 @@ text), `"page"` (no post element found; the page shows the text) or `false`
 
 Everything lives under `$AGENT_SURF_HOME` (default `~/.agent-surf`), **unencrypted**
 (encryption at rest would need a dependency; see BUILD-BRIEF). Protect it like
-your browser profile.
+your browser profile. On macOS/Linux the folder and its `maps`, `debug` and
+`media` folders are created 0700. Custom Substack domains (`sites add-domain`)
+are stored in `surf.db` too.
 
 | Path | What | Kept until |
 |---|---|---|
@@ -254,9 +291,14 @@ of the run.
 
 ### YouTube
 
-Media is never downloaded, so the player JavaScript is skipped and a video
-with no playable formats is not an error. Metadata, subtitles and comments
-need no JS-challenge solver: no extra package and no code fetched at runtime.
+Media is never downloaded. For metadata and comments the player JavaScript is
+skipped and a video with no playable formats is not an error. `--subs` runs
+yt-dlp's normal extraction with Node (caption tracks need the player), picks
+manual subtitles in `--sub-lang` (default `en`), else automatic captions, and
+returns plain text with `subtitles_status`: `ok`, `none_available` or
+`failed: <reason>`, so an empty transcript is never silent. No extra package
+and no remote components. A video URL never expands its playlist; searches and
+`/playlist` URLs stop at 1000 entries. `upload_date` is `YYYY-MM-DD`.
 
 ### Tests
 
@@ -297,7 +339,9 @@ covers the same check everywhere).
 ### Scrubbing HAR files
 
 `scrub <in.har> <out.har>` removes cookies, auth and token-shaped headers,
-redacts credential-named query/body parameters and, by default, **drops every
+redacts credential-named query, fragment and body parameters (only their
+values change), token-shaped URL path segments and bearer/JWT values under any
+name and, by default, **drops every
 response body** (each becomes `REDACTED (<n> bytes, <mime>)`) and WebSocket
 message data. `--keep-bodies` keeps JSON and text bodies but redacts keys that
 look like credentials or personal data (email, phone, password, birth date,
