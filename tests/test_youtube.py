@@ -27,14 +27,39 @@ General synthetic
 """
 
 
+TRACK_URL = "https://www.youtube.com/api/timedtext?v=vid00000001&lang=en&fmt=vtt"
+
+
+class FakeResponse:
+    def __init__(self, data):
+        self.data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def read(self):
+        return self.data
+
+
 class FakeYDL:
-    """Stands in for yt_dlp.YoutubeDL; never touches the network."""
+    """Stands in for yt_dlp.YoutubeDL; never touches the network. ``vtt``: the
+    body served for any subtitle URL (an Exception instance is raised)."""
     instances = []
 
-    def __init__(self, opts, info=None, fail_comments=False):
-        self.opts, self.info, self.fail_comments = opts, info, fail_comments
+    def __init__(self, opts, info=None, fail_comments=False, vtt=VTT):
+        self.opts, self.info, self.fail_comments, self.vtt = opts, info, fail_comments, vtt
         self.calls = []
+        self.fetched = []
         FakeYDL.instances.append(self)
+
+    def urlopen(self, url):
+        self.fetched.append(url)
+        if isinstance(self.vtt, Exception):
+            raise self.vtt
+        return FakeResponse(self.vtt.encode())
 
     def __enter__(self):
         return self
@@ -47,11 +72,6 @@ class FakeYDL:
         if self.fail_comments and self.opts.get("getcomments"):
             raise RuntimeError("comments endpoint changed")
         info = json.loads(json.dumps(self.info))
-        if self.opts.get("writesubtitles"):
-            for e in info.get("entries", [info]):
-                path = Path(self.opts["outtmpl"].replace("%(id)s", e["id"]).replace("%(ext)s", "en.vtt"))
-                path.write_text(VTT)
-                e["requested_subtitles"] = {"en": {"ext": "vtt", "filepath": str(path)}}
         if self.opts.get("getcomments"):
             info["comments"] = [{"id": "c1", "parent": "root", "author": "@someone",
                                  "text": "Nice", "like_count": 2, "timestamp": 1, "extra": "x"}]
@@ -89,34 +109,112 @@ def test_classify_rejects(target):
 def test_opts_never_contain_forbidden_keys(tmp_path):
     for subs in (False, True):
         for comments in (False, True):
-            opts = youtube.build_opts(subs=subs, comments=comments, outdir=tmp_path)
-            assert not youtube.FORBIDDEN_OPTS & opts.keys()
-            assert opts["skip_download"] is True
-            assert opts["js_runtimes"] == {"node": {}}
-            assert opts["ignore_no_formats_error"] is True
-            assert opts["extractor_args"]["youtube"]["player_skip"] == ["js"]
-            assert ("max_comments" in opts["extractor_args"]["youtube"]) == comments
+            for kind in ("video", "search", "playlist"):
+                opts = youtube.build_opts(subs=subs, comments=comments, kind=kind)
+                assert not youtube.FORBIDDEN_OPTS & opts.keys()
+                assert opts["skip_download"] is True
+                assert opts["js_runtimes"] == {"node": {}}
+                assert opts["ignore_no_formats_error"] is True
+                assert ("max_comments" in opts["extractor_args"]["youtube"]) == comments
+
+
+def test_subs_run_the_player_js_metadata_skips_it():
+    """Fix 32: caption tracks need the player; metadata and comments do not."""
+    assert "player_skip" not in youtube.build_opts(subs=True)["extractor_args"]["youtube"]
+    assert "player_skip" not in youtube.build_opts(subs=True, comments=True)["extractor_args"]["youtube"]
+    assert youtube.build_opts()["extractor_args"]["youtube"]["player_skip"] == ["js"]
+    assert youtube.build_opts(comments=True)["extractor_args"]["youtube"]["player_skip"] == ["js"]
+
+
+def test_playlist_options():
+    video = youtube.build_opts(kind="video")
+    assert video["noplaylist"] is True and "playlistend" not in video
+    for kind in ("search", "playlist"):
+        opts = youtube.build_opts(kind=kind)
+        assert opts["playlistend"] == youtube.MAX_SEARCH and "noplaylist" not in opts
 
 
 def test_real_youtubedl_accepts_opts(tmp_path):
     from yt_dlp import YoutubeDL
-    with YoutubeDL(youtube.build_opts(subs=True, comments=True, outdir=tmp_path)) as ydl:
-        assert ydl.params["writesubtitles"] and ydl.params["getcomments"]
-        assert not ydl.params["remote_components"]
+    with YoutubeDL(youtube.build_opts(subs=True, comments=True)) as ydl:
+        assert ydl.params["getcomments"] and ydl.params["noplaylist"]
+        assert ydl.params["skip_download"] and not ydl.params["remote_components"]
 
 
 def test_metadata_is_json_serialisable():
     (item,) = youtube.fetch("https://www.youtube.com/watch?v=vid00000001", ydl_factory=factory(VIDEO))
     json.dumps(item)
     assert item["item_id"] == "vid00000001" and item["page_type"] == "video"
-    assert "formats" not in item and "subtitles" not in item
+    assert "formats" not in item and "subtitles" not in item and "subtitles_status" not in item
+    assert item["upload_date"] == "2026-01-01"   # Fix 32: ISO date
     assert FakeYDL.instances[0].calls == [("https://www.youtube.com/watch?v=vid00000001", False)]
 
 
-def test_subtitles_as_text():
+def track(lang="en", url=TRACK_URL):
+    return {lang: [{"ext": "json3", "url": url + "&j"}, {"ext": "vtt", "url": url}]}
+
+
+def test_manual_subtitles_as_text():
+    info = dict(VIDEO, subtitles=track("en"), automatic_captions=track("en", TRACK_URL + "&kind=asr"))
+    (item,) = youtube.fetch("https://youtu.be/vid00000001", subs=True, ydl_factory=factory(info))
+    assert item["subtitles"] == "Hello there\nGeneral synthetic"
+    assert item["subtitles_status"] == "ok" and item["subtitles_kind"] == "manual"
+    assert item["subtitles_lang"] == "en"
+    ydl = FakeYDL.instances[0]
+    assert ydl.calls[0][1] is False and ydl.fetched == [TRACK_URL]   # never a download
+
+
+def test_automatic_captions_when_no_manual_track():
+    info = dict(VIDEO, subtitles={"de": track("de")["de"]}, automatic_captions=track("en-orig"))
+    (item,) = youtube.fetch("https://youtu.be/vid00000001", subs=True, ydl_factory=factory(info))
+    assert item["subtitles_status"] == "ok" and item["subtitles_kind"] == "automatic"
+    assert item["subtitles_lang"] == "en-orig"
+
+
+def test_sub_lang_is_configurable():
+    info = dict(VIDEO, subtitles=dict(track("en"), **track("fr-FR", TRACK_URL + "&lang=fr")))
+    (item,) = youtube.fetch("https://youtu.be/vid00000001", subs=True, sub_lang="fr",
+                            ydl_factory=factory(info))
+    assert item["subtitles_lang"] == "fr-FR" and FakeYDL.instances[0].fetched == [TRACK_URL + "&lang=fr"]
+
+
+def test_no_subtitles_available_is_said():
     (item,) = youtube.fetch("https://youtu.be/vid00000001", subs=True, ydl_factory=factory(VIDEO))
-    assert item["subtitles"] == {"en": "Hello there\nGeneral synthetic"}
-    assert FakeYDL.instances[0].calls[0][1] is True  # download=True writes subtitle files only
+    assert item["subtitles"] == "" and item["subtitles_status"] == "none_available"
+    assert FakeYDL.instances[0].fetched == []
+
+
+@pytest.mark.parametrize("vtt,status", [
+    (OSError("HTTP Error 429"), "failed: OSError"),
+    ("WEBVTT\n\n", "failed: the track was empty"),
+])
+def test_subtitle_failures_are_said(vtt, status):
+    info = dict(VIDEO, subtitles=track("en"))
+    (item,) = youtube.fetch("https://youtu.be/vid00000001", subs=True, ydl_factory=factory(info, vtt=vtt))
+    assert item["subtitles"] == "" and item["subtitles_status"] == status
+
+
+def test_subtitle_track_off_youtube_is_refused():
+    info = dict(VIDEO, subtitles=track("en", "https://evil.test/timedtext?x=1"))
+    (item,) = youtube.fetch("https://youtu.be/vid00000001", subs=True, ydl_factory=factory(info))
+    assert item["subtitles_status"].startswith("failed:") and FakeYDL.instances[0].fetched == []
+
+
+@pytest.mark.parametrize("raw,iso", [("20251018", "2025-10-18"), (None, None), ("2025-10-18", "2025-10-18")])
+def test_iso_date(raw, iso):
+    assert youtube.iso_date(raw) == iso
+
+
+def test_playlist_target():
+    assert youtube.classify_target("https://www.youtube.com/playlist?list=PLsynthetic") == "playlist"
+    assert youtube.classify_target("https://www.youtube.com/watch?v=abc&list=PLsynthetic") == "video"
+    pl = {"_type": "playlist", "id": "PLsynthetic", "entries": [dict(VIDEO, id=f"vid0000000{i}") for i in (1, 2)]}
+    items = youtube.fetch("https://www.youtube.com/playlist?list=PLsynthetic", ydl_factory=factory(pl))
+    assert [i["page_type"] for i in items] == ["playlist", "playlist"]
+    opts = FakeYDL.instances[0].opts
+    assert opts["playlistend"] == youtube.MAX_SEARCH and opts["extract_flat"] == "in_playlist"
+    youtube.fetch("https://www.youtube.com/watch?v=vid00000001&list=PLsynthetic", ydl_factory=factory(VIDEO))
+    assert FakeYDL.instances[0].opts["noplaylist"] is True
 
 
 def test_comments_best_effort():

@@ -69,6 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
     yt.add_argument("target", help="YouTube URL or ytsearchN:query")
     yt.add_argument("--subs", action="store_true", help="include subtitles")
     yt.add_argument("--comments", action="store_true", help="include comments (best-effort)")
+    yt.add_argument("--sub-lang", default="en", metavar="LANG",
+                    help="subtitle language (manual first, else automatic captions; default en)")
 
     scrub = sub.add_parser("scrub", help="strip cookies, auth and response bodies from a HAR file")
     scrub.add_argument("src")
@@ -344,7 +346,8 @@ def cmd_youtube(cfg: config.Config, args: argparse.Namespace) -> int:
     from agent_surf import youtube
 
     with Store(cfg.db_path) as store, _RunScope(store) as run_id:
-        items = youtube.run_youtube(store, args.target, subs=args.subs, comments=args.comments)
+        items = youtube.run_youtube(store, args.target, subs=args.subs, comments=args.comments,
+                                    sub_lang=args.sub_lang)
         code = deliver(store, items, args.json, run_id=run_id)
     log.info("%d new video(s)", len(items))
     return code
