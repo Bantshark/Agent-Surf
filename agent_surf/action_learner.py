@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agent_surf import actionmap, challenge, learner, runner, sitemap, sites
+from agent_surf import actionmap, challenge, learner, noresults, runner, sitemap, sites
 from agent_surf.actionmap import (ActionMapError, COMPOSER_CLICK_LABELS, DISCARD_CLICK_LABELS,
                                   SUBMIT_LABELS)
 from agent_surf.executor import ActionPage, Refused, StepFailed, StepRunner
@@ -267,6 +267,11 @@ def learn_action(store: Store, page: ActionPage, site: str, action: str, *, clie
 
     challenge.ensure_logged_in(page.read)   # never send a login wall to the model
     aria_before = page.read.aria_snapshot()
+    empty = noresults.marker_reason(page.read, aria_before)   # Fix 29: nor an empty page
+    roles = {role for _, role in sitemap._aria_roles(aria_before)}
+    if empty or not roles & {"textbox", "button"}:
+        raise ActionLearnError("nothing to learn from: the page shows "
+                               + (f"no results ({empty})" if empty else "no composer or controls"))
     prompt = build_action_prompt(site, action, url, aria_before, page.buffer.all(), old_map, broken_reason)
     log.info("asking %s for a %s %s action map", model, site, action)
     response = client.messages.create(model=model, max_tokens=MAX_TOKENS, system=ACTION_SYSTEM_PROMPT,

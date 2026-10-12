@@ -95,8 +95,9 @@ def test_goto_detects_off_site_redirect():
 
 def test_read_only_surface():
     public = {n for n in dir(ReadOnlyPage) if not n.startswith("_")}
+    # count (Fix 29) is a pure read: how many elements match a selector.
     assert public == {"goto", "scroll", "wait", "expand", "check_domain", "url", "title",
-                      "frame_urls", "aria_snapshot", "dom_items", "close"}
+                      "frame_urls", "aria_snapshot", "dom_items", "count", "close"}
 
 
 def _free_port():

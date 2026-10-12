@@ -337,6 +337,16 @@ class ReadOnlyPage:
             log.warning("aria snapshot failed: %s", type(e).__name__)
             return ""
 
+    def count(self, selector: str) -> int:
+        """How many elements match a CSS selector (pure read; 0 on a bad selector)."""
+        try:
+            return int(self._page.evaluate(
+                "s => { try { return document.querySelectorAll(s).length; } catch (e) { return 0; } }",
+                selector) or 0)
+        except Exception as e:
+            log.warning("element count failed: %s", type(e).__name__)
+            return 0
+
     def dom_items(self, dom: dict) -> list[dict]:
         """Raw items ``{"item_id", "fields"}`` for a map's dom block."""
         from agent_surf.sitemap import normalize_id

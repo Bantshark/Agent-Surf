@@ -164,6 +164,28 @@ POLLING_HTML = """<!doctype html>
 """
 
 
+# Fix 29: search result pages. "nothing": the site's no-results marker (text and
+# an empty-state testid); "blank": the results area (main) is there but empty;
+# "broken": no main landmark at all (a missing structure is a broken map);
+# "changed": main is full of posts the map's selectors no longer match.
+def search_page(body):
+    return ('<!doctype html><html><head><meta charset="utf-8"><title>Search / Feed Test</title></head>'
+            '<body><nav aria-label="Primary"><a href="/">Home</a><a href="/more">More</a>'
+            '<a href="/late">Late</a></nav>' + body + '</body></html>')
+
+
+SEARCH_PAGES = {
+    "/search/nothing": search_page('<main><h1>Search</h1><div data-testid="emptyState">'
+                                   '<p>No results for “nothing”</p>'
+                                   '<p>Try searching for something else.</p></div></main>'),
+    "/search/blank": search_page('<main><h1>Search</h1><section aria-label="Results"></section></main>'),
+    "/search/broken": search_page('<div><h1>Search</h1><p>Loading results</p></div>'),
+    "/search/changed": search_page('<main><h1>Search</h1>' + "".join(
+        f'<div class="post-v2" data-id="p{i}"><p>Synthetic post {i}</p><a href="#">user_{i}</a></div>'
+        for i in range(1, 6)) + '</main>'),
+}
+
+
 def feed_page(n):
     edges = []
     for k in range(PER_PAGE):
@@ -206,6 +228,7 @@ def build_feed():
                entry(ORIGIN + "/static-divs", "text/html; charset=utf-8", STATIC_DIVS_HTML),
                entry(ORIGIN + "/ticking", "text/html; charset=utf-8", TICKING_HTML),
                entry(ORIGIN + "/polling", "text/html; charset=utf-8", POLLING_HTML),
+               *[entry(ORIGIN + path, "text/html; charset=utf-8", html) for path, html in SEARCH_PAGES.items()],
                entry(ORIGIN + "/api/config", "application/json",
                      json.dumps({"features": {"dark_mode": True}}))]
     for n in range(1, PAGES + 1):

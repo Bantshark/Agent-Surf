@@ -96,6 +96,37 @@ LOGGED_OUT: dict[str, LoggedOutMarkers] = {
                                ("log in to reddit",)),
 }
 
+# Fix 29: an empty result page is not a broken map. Markers that a page says
+# "no results": URL path prefixes, title substrings, text in the accessibility
+# snapshot and data-testid values, all matched case-insensitively. Guesses to
+# be validated locally; data only, extend freely.
+@dataclass(frozen=True)
+class NoResultsMarkers:
+    paths: tuple[str, ...] = ()
+    titles: tuple[str, ...] = ()
+    texts: tuple[str, ...] = ()
+    testids: tuple[str, ...] = ()
+
+
+NO_RESULTS: dict[str, NoResultsMarkers] = {
+    "x": NoResultsMarkers(texts=("no results for",), testids=("emptyState",)),
+    "linkedin": NoResultsMarkers(texts=("no results found",)),
+    "reddit": NoResultsMarkers(texts=("no results", "couldn't find any results",
+                                      "couldn’t find any results")),
+    "instagram": NoResultsMarkers(texts=("no results found",)),
+    "facebook": NoResultsMarkers(texts=("we didn't find any results", "we didn’t find any results")),
+}
+
+
+def no_results_markers(site: str) -> NoResultsMarkers:
+    return NO_RESULTS.get(site, NoResultsMarkers())
+
+
+def takes_query(site: str, page_type: str) -> bool:
+    """Does this page type's URL take --query (a search)?"""
+    return "{query}" in get_site(site).page_types.get(page_type, "")
+
+
 # The page `doctor` opens to check that the browser profile is logged in.
 HOME_URL: dict[str, str] = {
     "x": "https://x.com/home",

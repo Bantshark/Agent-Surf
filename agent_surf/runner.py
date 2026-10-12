@@ -6,7 +6,9 @@ first, DOM as fallback), emits only ids not seen before, and stops on
 ``max_items``. If the first pass finds nothing usable it raises ``MapBroken``;
 deciding whether to relearn is the caller's job. A login wall is never a
 broken map: it raises challenge.LoggedOut instead (the guard waits for a login
-first).
+first). Neither is an empty result page (Fix 29): the site's "no results"
+marker, or on a search page a quiet page whose ``main`` landmark is present but
+empty, ends the run with 0 items and stop_reason "no_results".
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from agent_surf import challenge, sitemap, sites
+from agent_surf import challenge, noresults, sitemap, sites
 from agent_surf.browser import ReadOnlyPage
 from agent_surf.store import Store
 
@@ -171,6 +173,20 @@ def wait_for_content(m: dict, page: ReadOnlyPage, since_seq: int, guard: Guard,
         deadline += time.monotonic() - started
 
 
+def no_results(m: dict, page: ReadOnlyPage, *, quiet: bool) -> str | None:
+    """Fix 29: why a first pass without items is an empty result, not a broken
+    map: the site's no-results marker, or (search pages only) a quiet page whose
+    main landmark is present but empty. A missing structure is broken."""
+    reason = noresults.marker_reason(page)
+    if reason:
+        return reason
+    if quiet and sites.takes_query(m["site"], m["page_type"]):
+        empty, has_main = noresults.emptiness(page.aria_snapshot())
+        if empty and has_main:
+            return "the results area is present but empty"
+    return None
+
+
 def run(store: Store, page: ReadOnlyPage, site: str, page_type: str, *,
         query: str | None = None, handle: str | None = None, guard: Guard | None = None) -> RunResult:
     m = load_current_map(store, site, page_type)
@@ -193,7 +209,7 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
     guard(page)
     page.wait(delay)
     guard(page)
-    wait_for_content(m, page, start_seq, guard)
+    ready = wait_for_content(m, page, start_seq, guard)
 
     challenge.ensure_logged_in(page)   # before the first pass: a login wall is not a broken map
     click_selectors = list(m.get("click") or [])
@@ -214,12 +230,10 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
         page.wait(delay)
         guard(page)
 
+    # Measured here (after navigation and one wait, before any scroll, as the
+    # learner does); counted only once the first pass found items (an empty
+    # result page is not a layout change).
     result.fingerprint = sitemap.fingerprint(page.aria_snapshot())
-    result.drift_count = track_drift(store, m, result.fingerprint)
-    if result.drift_count >= DRIFT_RUNS:
-        result.drift = True
-        log.warning("layout drift on %s %s: page structure has differed from when the map was "
-                    "learned for %d runs in a row", site, page_type, result.drift_count)
 
     def pass_items(source: str) -> list[dict]:
         nonlocal cursor
@@ -259,8 +273,19 @@ def replay(m: dict, page: ReadOnlyPage, store: Store, url: str, *, guard: Guard 
                 broken = f"every item misses a required field ({', '.join(required)})"
             if broken:
                 challenge.ensure_logged_in(page)
+                if chosen is None:
+                    empty = no_results(m, page, quiet=ready is None)
+                    if empty:
+                        log.info("%s %s: no results (%s); nothing to relearn", site, page_type, empty)
+                        result.stop_reason = "no_results"
+                        return result
                 raise MapBroken(broken, m)
             result.source = chosen
+            result.drift_count = track_drift(store, m, result.fingerprint)
+            if result.drift_count >= DRIFT_RUNS:
+                result.drift = True
+                log.warning("layout drift on %s %s: page structure has differed from when the map "
+                            "was learned for %d runs in a row", site, page_type, result.drift_count)
             row = store.map_row(site, page_type, m["version"]) if "version" in m else None
             problems = health_problems(batch, required, row["dry_run_items"] if row else None)
             if problems:

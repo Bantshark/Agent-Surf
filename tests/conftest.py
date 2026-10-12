@@ -52,6 +52,7 @@ FEED_SITE = sites.Site("feedtest", ("feed.test",), {
     "latechallenge": "https://feed.test/late-challenge",
     "latesidebar": "https://feed.test/late-sidebar",
     "staticdivs": "https://feed.test/static-divs",
+    "search": "https://feed.test/search/{query}",
 })
 
 

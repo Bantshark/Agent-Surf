@@ -16,7 +16,7 @@ import re
 import time
 from typing import Any
 
-from agent_surf import challenge, runner, sitemap, sites
+from agent_surf import challenge, noresults, runner, sitemap, sites
 from agent_surf.browser import CapturedResponse, ReadOnlyPage
 from agent_surf.runner import Guard, MapBroken, RunResult
 from agent_surf.store import Store, now_iso
@@ -272,6 +272,9 @@ def learn(store: Store, page: ReadOnlyPage, site: str, page_type: str, *, client
     page.check_domain()
 
     challenge.ensure_logged_in(page)   # never send a login wall to the model
+    empty = noresults.nothing_to_learn(page)   # Fix 29: nor an empty or no-results page
+    if empty:
+        raise LearnError(f"nothing to learn from: {empty}; try a page or query that shows items")
     aria = page.aria_snapshot()
     prompt = build_prompt(site, page_type, url, aria, page.buffer.all(), old_map, broken_reason)
     log.info("asking %s for a %s %s map", model, site, page_type)

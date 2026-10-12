@@ -47,11 +47,13 @@ def test_feed_never_arrives_breaks_after_timeout_and_heals_once(store, har_page,
     with pytest.raises(MapBroken, match="no items"):
         runner.run(store, har_page("feed.har"), "feedtest", "never")
 
+    # Fix 29: the page never shows anything, so the relearn refuses before the
+    # model is called (nothing to learn from); the heal fails once, unpaid.
     client = FakeClient(fenced(model_map()), fenced(model_map()))
-    with pytest.raises(learner.HealFailed):
+    with pytest.raises(learner.HealFailed, match="nothing to learn from"):
         learner.run_with_heal(store, har_page("feed.har"), "feedtest", "never", client=client,
                               model="claude-sonnet-5-5", maps_dir=tmp_path / "maps")
-    assert len(client.calls) == 1
+    assert len(client.calls) == 0
 
 
 class FakeHTTPResponse:
