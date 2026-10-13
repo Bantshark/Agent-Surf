@@ -140,7 +140,11 @@ def track_drift(store: Store, m: dict, fp: str, *, healthy: bool = True) -> tupl
     stored fingerprint from an older scheme is replaced by this run's (no
     warning). Fix 31: when the streak reaches DRIFT_RUNS and extraction was
     healthy on each of those runs, the layout changed but the map still works:
-    this run's fingerprint becomes the baseline and the streak resets."""
+    this run's fingerprint becomes the baseline and the streak resets.
+    Fix 39: only the most recent DRIFT_RUNS runs decide (an older unhealthy
+    run in the streak does not), and only runs that finished are recorded:
+    the caller calls this at the end of a run, so a run stopped by the time
+    budget, a machine sleep or a closed tab is never a health problem."""
     row = store.map_row(m["site"], m["page_type"], m["version"]) if "version" in m else None
     if row is None:
         return 0, False
@@ -160,6 +164,22 @@ def track_drift(store: Store, m: dict, fp: str, *, healthy: bool = True) -> tupl
     store.update_drift(site, page_type, version, last_fingerprint=fp, drift_count=count,
                        healthy_runs=healthy_runs)
     return count, False
+
+
+def record_drift(store: Store, m: dict, result: RunResult, *, healthy: bool) -> None:
+    site, page_type = m["site"], m["page_type"]
+    result.drift_count, result.rebaselined = track_drift(store, m, result.fingerprint, healthy=healthy)
+    if result.rebaselined:
+        log.info("layout changed but extraction is healthy; baseline updated (%s %s)", site, page_type)
+    elif result.drift_count >= DRIFT_RUNS:
+        result.drift = True
+        row = store.map_row(site, page_type, m["version"])
+        recent = min(row["healthy_drift_runs"] or 0, DRIFT_RUNS) if row else 0
+        log.warning("layout drift on %s %s: page structure has differed from when the map was "
+                    "learned for %d runs in a row, with an extraction health problem in the last "
+                    "%d (%d of them healthy; %d healthy runs in a row rebaseline it, or run: "
+                    "agent-surf maps rebaseline %s %s)", site, page_type, result.drift_count,
+                    DRIFT_RUNS, recent, DRIFT_RUNS, site, page_type)
 
 
 def health_problems(batch: list[dict], required: list[str], dry_run_items: int | None) -> list[str]:
@@ -361,6 +381,7 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
         return extract_items(m, source, page)
 
     run_ids: set[str] = set()
+    problems: list[str] = []
     consecutive_seen = consecutive_older = 0
     newest: float | None = None   # newest time among the items this run delivered
     tfield: str | None = None
@@ -403,16 +424,6 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
             tfield = time_field(m, chosen)
             row = store.map_row(site, page_type, m["version"]) if "version" in m else None
             problems = health_problems(batch, required, row["dry_run_items"] if row else None)
-            result.drift_count, result.rebaselined = track_drift(store, m, result.fingerprint,
-                                                                 healthy=not problems)
-            if result.rebaselined:
-                log.info("layout changed but extraction is healthy; baseline updated (%s %s)",
-                         site, page_type)
-            elif result.drift_count >= DRIFT_RUNS:
-                result.drift = True
-                log.warning("layout drift on %s %s: page structure has differed from when the map "
-                            "was learned for %d runs in a row, with an extraction health problem "
-                            "on at least one of them", site, page_type, result.drift_count)
             if problems:
                 result.drift = True
                 log.warning("extraction health dropped on %s %s: %s", site, page_type,
@@ -463,6 +474,7 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
 
     if newest is not None:   # a successful run: budget/sleep/closed stops raise before here
         store.set_high_water(site, page_type, url, newest)
+    record_drift(store, m, result, healthy=not problems)   # Fix 39: finished runs only
     log.info("%s %s: %d new item(s), stopped on %s after %d scroll(s)",
              site, page_type, len(result.items), result.stop_reason, result.scrolls)
     return result

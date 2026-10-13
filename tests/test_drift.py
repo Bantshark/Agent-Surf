@@ -192,3 +192,53 @@ def test_rebaseline_command(tmp_path, monkeypatch, capsys, har_page, caplog):
         with pytest.raises(runner.MapBroken, match="not rebaselined"):
             runner.rebaseline(s, empty, "drifttest", "feed", handle="empty")
         assert s.current_map("drifttest", "feed")["fingerprint"] == out["fingerprint"]
+
+
+# Fix 39: only the most recent DRIFT_RUNS finished runs decide.
+
+def test_old_unhealthy_run_does_not_block_rebaseline(store, har_page, learned, caplog):
+    result, warnings = run(store, har_page, "redesign-sparse", caplog)   # unhealthy, days ago
+    assert result.drift_count == 1 and not result.rebaselined
+    for n in (2, 3):
+        result, _ = run(store, har_page, "redesign", caplog)
+        assert result.drift_count == n and not result.rebaselined   # only 1, then 2 healthy in a row
+    result, warnings = run(store, har_page, "redesign", caplog)       # 3 recent runs all healthy
+    assert result.rebaselined and result.drift_count == 0 and warnings == []
+
+
+def test_unhealthy_run_within_the_last_n_blocks_rebaseline(store, har_page, learned, caplog):
+    for variant in ("redesign", "redesign", "redesign-sparse", "redesign"):
+        result, warnings = run(store, har_page, variant, caplog)
+    assert not result.rebaselined and result.drift_count == 4
+    assert any("health problem in the last 3 (1 of them healthy" in w for w in warnings), warnings
+    for variant in ("redesign", "redesign"):
+        result, _ = run(store, har_page, variant, caplog)
+    assert result.rebaselined
+
+
+@pytest.mark.parametrize("stop", ["time_budget", "machine_slept", "closed"])
+def test_interrupted_runs_are_not_health_problems(store, har_page, learned, tmp_path, caplog, stop):
+    from agent_surf import budget
+    from agent_surf.browser import BrowserClosed
+
+    m = dict(learned, version=2, scroll=dict(learned["scroll"], max_scrolls=1))
+    store.add_map("drifttest", "feed", 2, sitemap.save_map(tmp_path, m), m["fingerprint"], dry_run_items=4)
+    for _ in range(2):
+        run(store, har_page, "redesign", caplog)
+    page = har_page("drift.har", DRIFT_SITE)
+    error = {"time_budget": budget.BudgetExceeded("spent"), "machine_slept": budget.MachineSlept("slept"),
+             "closed": BrowserClosed()}[stop]
+
+    def interrupted():
+        raise error
+
+    page.scroll = interrupted   # stops after the first pass of an unhealthy (sparse) page
+    if stop == "closed":
+        with pytest.raises(BrowserClosed):
+            runner.run(store, page, "drifttest", "feed", handle="redesign-sparse")
+    else:
+        r = runner.run(store, page, "drifttest", "feed", handle="redesign-sparse")
+        assert r.stop_reason == stop
+    assert store.current_map("drifttest", "feed")["drift_count"] == 2   # not recorded at all
+    result, warnings = run(store, har_page, "redesign", caplog)
+    assert result.rebaselined and warnings == []
