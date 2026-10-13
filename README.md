@@ -27,9 +27,10 @@ python -m agent_surf maps  list | show <site> <page_type> | rebaseline <site> <p
 python -m agent_surf youtube <url-or-ytsearchN:query> [--subs [--sub-lang en]] [--comments] [--json]
 python -m agent_surf items [--site S] [--page-type P] [--run RUN_ID | --since ISO8601 | --undelivered] [--json] [--mark-delivered]
 python -m agent_surf scrub <in.har> <out.har> [--keep-bodies]
-python -m agent_surf doctor [--sites x,linkedin] [--json]
+python -m agent_surf doctor [--sites x,linkedin] [--check-key] [--json]
 python -m agent_surf sites list | add-domain substack <domain> | remove-domain substack <domain>
-python -m agent_surf key set | key clear              # Windows: Anthropic key in the Credential Manager
+python -m agent_surf key set [--visible] | key clear   # Windows: Anthropic key in the Credential Manager
+python -m agent_surf key test                         # one minimal API call: prints ok or the error
 ```
 
 1. `chrome` prints a command that starts Chrome with a dedicated profile under
@@ -45,7 +46,8 @@ python -m agent_surf key set | key clear              # Windows: Anthropic key i
    pinned packages, the browser (loopback CDP), the login state of every site
    (one tab on its home page, closed again; `--sites x,linkedin` limits it),
    that maps validate, lookups, account handles, Telegram and the Anthropic
-   key (presence and source only), data size and queue counts. Login is "ok"
+   key (presence and source only; `--check-key` also makes one minimal
+   authenticated API call, no tokens used), data size and queue counts. Login is "ok"
    only when an account marker (menu/avatar) is seen; a login wall fails (or
    warns, for a site you have no maps for) and neither is "login state
    unknown" (warn). Exit 0 when nothing required failed, else 1.
@@ -66,10 +68,27 @@ tab or Chrome ends the command with "the browser tab or Chrome closed during
 the run; rerun" (exit 1, no traceback); a publish that had not reached the
 Post click stays approved.
 
+**Ranked feeds stop on time.** An algorithmic feed (X "For you") is reshuffled
+on every load, so "already seen" never stops it. When a map extracts a time
+field (`created_at`, `timestamp`, `time` or `date`), a run also stops after 5
+items in a row (`scroll.stop_after_older`) older than the newest item the last
+successful run of the same page and query delivered: stop reason
+`older_than_last_run`. Maps marked `"ranked": true` (the learner sets it for
+algorithmic feeds) scroll at most 10 times. Agent Surf never switches X's
+"For you"/"Following" tabs; x.com/home opens on the tab you chose last in
+that browser.
+
+**Challenges.** Only a visible challenge stops a run: a CAPTCHA page path or
+"Just a moment" title, a visible reCAPTCHA image challenge, hCaptcha or
+Cloudflare frame, the visible "I'm not a robot" checkbox, or any visible
+captcha frame of at least 100x100 px. The invisible reCAPTCHA that Reddit and
+LinkedIn load on every page is ignored. Agent Surf never touches a challenge.
+
 **Layout drift.** When a site changes its layout but the map still extracts
-healthily for 3 runs in a row, the new layout becomes the baseline
-automatically ("baseline updated"). The drift warning only stays when
-extraction also suffered. `maps rebaseline <site> <page_type>` does it by
+healthily for the 3 most recent runs, the new layout becomes the baseline
+automatically ("baseline updated"), whatever happened earlier in the streak;
+runs stopped by the time budget, a sleep or a closed tab do not count. The
+drift warning only stays when one of those 3 runs had an extraction problem. `maps rebaseline <site> <page_type>` does it by
 hand (one tab, no Claude call).
 
 **Never losing items.** `run`, `inbox` and `youtube` print `run_id=...` on
@@ -89,7 +108,15 @@ minutes it exits 7 (a queue item stays approved and is retried later).
 `agent-surf/anthropic`, prompted without echo) and Agent Surf reads it from
 there when the variable is unset; `key clear` removes it. Elsewhere, use the
 environment variable. The key is never printed or logged; `doctor` says only
-"present via env", "present via credential manager" or "missing".
+"present via env", "present via credential manager" or "missing". Before
+storing, `key set` warns and asks when the paste looks wrong (pasted twice or
+three times, spaces or quotes, a leading `ANTHROPIC_API_KEY=`, no `sk-ant-`
+prefix), showing only its length. `key set --visible` shows what you paste
+(clear the screen afterwards). `key test` (any OS) makes one minimal
+authenticated call and prints `ok` or the error. A rejected key, a rate limit
+or no network ends any command with one line ("the Anthropic key was rejected
+(401); run: agent-surf key set") and exit 1; it never counts as a failed
+relearn, and a queue item stays approved.
 
 Sites and page types:
 
@@ -121,7 +148,10 @@ cap, or an invalid action map), `6` publish needs attention (attempted but not
 confirmed published; see `queue show <id>`), `7` logged out (no login within 10
 minutes; nothing was relearned or sent to Claude, and a queue item stays
 approved). `queue approve --all-drafts` without `--yes` lists the drafts and
-exits 2. A run that finds no results exits 0.
+exits 2. A run that finds no results exits 0. An Anthropic API error (bad
+key, rate limit, no network) exits 1 with one line. Run stop reasons:
+`max_scrolls`, `max_items`, `stop_after_seen`, `older_than_last_run`,
+`no_results`, `time_budget`, `machine_slept`.
 
 Environment:
 
@@ -299,6 +329,9 @@ returns plain text with `subtitles_status`: `ok`, `none_available` or
 `failed: <reason>`, so an empty transcript is never silent. No extra package
 and no remote components. A video URL never expands its playlist; searches and
 `/playlist` URLs stop at 1000 entries. `upload_date` is `YYYY-MM-DD`.
+Transcript text has HTML entities decoded and whitespace collapsed; a
+subtitle download answered 429 or 5xx is retried after 2 s and 6 s before
+`failed: HTTPError <status>`.
 
 ### Tests
 

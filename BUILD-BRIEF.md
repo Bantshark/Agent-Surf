@@ -645,6 +645,80 @@ issues were fixed on branch `claude/validate-fixes`:
     is now logged outside the except block, and a conftest fixture restores
     logging state after every test; a test runs the two modules in both
     orders. Tests: `test_review_findings.py`.
+36. **Invisible reCAPTCHA treated as a challenge** (local validation: every
+    learn/run on Reddit r/startups/new and the LinkedIn feed logged
+    "recaptcha iframe on page", waited 600 s and exited 3). Cause: the frame
+    rule matched URLs only, and both sites load reCAPTCHA Enterprise anchors
+    on every page (Reddit 256x60 hidden, LinkedIn 0x0). Change:
+    `ReadOnlyPage.frame_infos()` (pure read) gives every captcha-looking
+    frame's URL, visibility (display, visibility, opacity of it and its
+    ancestors; not pushed off the page) and size; `challenge.detect_frames`
+    counts a frame only if it is visible and at least
+    `MIN_CHALLENGE_FRAME_PX` (100) in both directions, or is a visible
+    challenge-only frame (reCAPTCHA `bframe`, hCaptcha, Cloudflare) at any
+    size, or is the visible reCAPTCHA checkbox. Decision: the checkbox
+    ("I'm not a robot", 304x78, anchor not `size=invisible`, at least
+    150x70) needs a human click, so it IS a challenge; the invisible badge
+    (256x60, `size=invisible`) is not. URL-path and title rules are
+    unchanged; the pure `detect(url, title, frame_urls)` stays for tests and
+    for pages without `frame_infos`; the wait loop re-reads the frames on
+    every poll, so a challenge that becomes visible later is still caught.
+    Nothing ever interacts with a challenge. Tests: `test_challenge.py`.
+37. **API errors crashed with a traceback; a doubled key was stored**
+    (local validation: `learn x home` with a wrong key ended in
+    `anthropic.AuthenticationError: Error code: 401`; the first `key set`
+    stored the key pasted twice, 212 chars). Change: every model call
+    (learn, learn-action, self-heal, inbox, the publisher's relearn) goes
+    through `modelapi.call`: 401, 403, 429, connection errors and other
+    status errors become `ModelUnavailable`, one line ("the Anthropic key was
+    rejected (401); run: agent-surf key set", "rate limited ... try again
+    later", "cannot reach the Anthropic API"), exit 1, no traceback, never
+    the key, the request or the response body. A relearn that could not ask
+    the model is not a failed heal: no HealFailed, the map is untouched, a
+    queue item goes back to approved (nothing submitted) and the dispatcher
+    notifies and moves on. `key set` warns and asks (y/N) when the value
+    looks pasted 2 or 3 times, contains whitespace or quotes, starts with
+    `ANTHROPIC_API_KEY=` or not with `sk-ant-` (only its length and the
+    reasons are shown); `key set --visible` reads with input() and reminds
+    to clear the screen. `key test` makes one minimal authenticated call
+    (list one model, no tokens) and prints "ok" or the clean error;
+    `doctor --check-key` runs the same test. Tests: `test_model_errors.py`.
+38. **Algorithmic feeds never stopped early** (local validation: `run x
+    home` twice returned 70 new items each, overlap 0, both on max_scrolls).
+    Cause: "For you" is reshuffled per load, so `stop_after_seen` never
+    fires. Change: when the map extracts a time field (`created_at`,
+    `timestamp`, `time`, `date`; ISO 8601, RFC 2822, X's legacy format or
+    epoch s/ms), the runner stops after `scroll.stop_after_older` (optional,
+    default 5) consecutive items older than the newest item delivered by the
+    previous successful run of the same page: stop_reason
+    "older_than_last_run". The mark is stored per site, page type and page
+    URL (so per query/handle) in table `high_water` (additive), never moves
+    back, and is not updated by runs stopped by the budget, a sleep or a
+    closed tab. Untimed items neither count nor reset the streak; whichever
+    of the seen and older stops triggers first wins. Optional map key
+    `"ranked": true` (validated; the learner is told to set it for
+    algorithmic feeds) caps max_scrolls at 10. `x home` stays
+    `https://x.com/home`: no stable URL for the chronological Following
+    timeline is known (guess to confirm locally: X opens the tab last chosen
+    in that browser). Tests: `test_ranked_feed.py`.
+39. **Auto-rebaseline never fired** (local validation: x search warned
+    "layout drift ... 14 runs in a row, with an extraction health problem"
+    long after one unhealthy run, a run killed by a sleep). Change: drift and
+    health are recorded at the end of a finished run only, so a run stopped
+    by the time budget, a machine sleep or a closed tab is never a health
+    problem (it is not recorded at all); the baseline moves once the most
+    recent DRIFT_RUNS drifted runs were all healthy, whatever older history
+    the streak holds. The warning says how many of the last DRIFT_RUNS were
+    healthy and names `maps rebaseline`. Tests: `test_drift.py`.
+40. **Transcript entities, one failed subtitle fetch, log noise** (local
+    validation: "&nbsp;" in transcripts, "failed: HTTPError" on one of three
+    videos, "socket.send() raised exception." repeated during challenge
+    waits). Change: transcript lines are HTML-unescaped and whitespace
+    collapsed; a subtitle fetch answered 429 or 5xx is retried after 2 s and
+    then 6 s (`SUB_RETRY_DELAYS`) before "failed: HTTPError <status>"; other
+    errors are not retried. A filter on the asyncio logger lowers exactly
+    that transport line to DEBUG (installed by the CLI and every browser
+    session); every other asyncio record passes. Tests: `test_youtube.py`.
 
 ## Agent Surf v2: the write layer
 Built on branch `claude/agent-surf-v2` (base `claude/cold-start-fix`, so the
@@ -790,9 +864,13 @@ the no-results markers (`sites.NO_RESULTS`), the positive logged-in markers
 (`sites.LOGGED_IN`) and the Substack logged-out markers; every Substack URL
 template (`notes`, `search`, `profile`, `/activity` as inbox), its Notes
 composer labels and `sites.HOME_URL["substack"]`; the YouTube subtitle path
-(player JS through Node, VTT through yt-dlp's opener). (Live already: X
-search and post maps, the X login markers via doctor, LinkedIn's /login
-marker, Fix 21 recovery after a sleep.)
+(player JS through Node, VTT through yt-dlp's opener). Since round 6 also:
+the challenge frame size constants (`MIN_CHALLENGE_FRAME_PX` 100, checkbox
+150x70) against real visible challenges; that X keeps the chosen
+Following/For you tab for x.com/home; the time formats real maps extract
+for the older-than-last-run stop. (Live already: X search, home and post
+maps, the X, LinkedIn and Reddit logged-in markers, LinkedIn's /login
+marker, Fix 21 recovery after a sleep, Credential Manager key read.)
 
 ### Known gaps after hardening
 - Encryption at rest: `$AGENT_SURF_HOME` (queue text, receipts, debug folders,
