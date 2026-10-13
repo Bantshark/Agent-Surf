@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from agent_surf import actionmap, budget, challenge, outbox, runner, sitemap, sites
+from agent_surf import actionmap, budget, challenge, modelapi, outbox, runner, sitemap, sites
 from agent_surf.browser import BrowserClosed, is_closed_error, page_alive
 from agent_surf.executor import (ActionPage, Refused, StepFailed, SubmitUnknown, Submitter,
                                  normalize_text)
@@ -424,7 +424,8 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
     def stopped(e: Exception) -> None:
         """Fix 30: the tab or Chrome closed, the time budget ran out or the
         machine slept before the submit click: nothing was submitted, so the
-        item goes back to approved (with last_error) and the error is raised."""
+        item goes back to approved (with last_error) and the error is raised.
+        Fix 37: so does a relearn that could not reach the model."""
         assert_not_submitted()
         error = f"not attempted (nothing submitted): {e}"
         outbox.release(store, item_id, error)
@@ -487,6 +488,8 @@ def publish(store: Store, open_page: OpenPage, item_id: int, *, client: Any = No
                 logged_out(page, le)
                 continue
             except (BrowserClosed, budget.BudgetExceeded) as le:
+                stopped(le)
+            except modelapi.ModelUnavailable as le:   # Fix 37: the relearn never ran; nothing submitted
                 stopped(le)
             except Exception as le:
                 if is_closed_error(le):

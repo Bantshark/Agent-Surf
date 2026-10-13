@@ -171,11 +171,16 @@ def build_parser() -> argparse.ArgumentParser:
     doc = sub.add_parser("doctor", help="check packages, browser, login, maps, keys and queue "
                                         "(no model calls, no publishing)")
     doc.add_argument("--sites", help="comma-separated sites to check (default: every site)")
+    doc.add_argument("--check-key", action="store_true",
+                     help="also make one minimal authenticated Anthropic API call (no tokens used)")
 
     key = sub.add_parser("key", help="store the Anthropic API key in the Windows Credential Manager")
     ksub = key.add_subparsers(dest="key_command", required=True)
-    ksub.add_parser("set", parents=[nested], help="prompt for the key (hidden) and store it")
+    kset = ksub.add_parser("set", parents=[nested], help="prompt for the key (hidden) and store it")
+    kset.add_argument("--visible", action="store_true",
+                      help="show what you paste (input() instead of a hidden prompt); clear the screen after")
     ksub.add_parser("clear", parents=[nested], help="remove the stored key")
+    ksub.add_parser("test", parents=[nested], help="one minimal authenticated API call: prints ok or the error")
 
     pg = sub.add_parser("purge", help="delete old stored items and debug folders (maps, queue, "
                                       "receipts and seen ids are kept)")
@@ -691,30 +696,72 @@ def cmd_doctor(cfg: config.Config, args: argparse.Namespace) -> int:
 
     with Store(cfg.db_path) as store:
         only = [s.strip() for s in args.sites.split(",") if s.strip()] if args.sites else None
-        report = doctor.run_doctor(cfg, store, open_session=BrowserSession, only_sites=only)
+        report = doctor.run_doctor(cfg, store, open_session=BrowserSession, only_sites=only,
+                                   key_client=(lambda: make_client(cfg)) if args.check_key else None)
     emit(args, report, doctor.format_text(report))
     return EXIT_OK if report["ok"] else EXIT_ERROR
 
 
-def cmd_key(cfg: config.Config, args: argparse.Namespace) -> int:
-    """Fix 27. The value is read with getpass and never printed or logged."""
-    from agent_surf import credentials
+def read_key(visible: bool) -> str:
+    """Fix 37: hidden (getpass) by default; --visible echoes what is pasted."""
+    if visible:
+        value = input("Anthropic API key (VISIBLE as you paste): ")
+        print("agent-surf: the key is on screen now; clear the screen (cls / clear) when done",
+              file=sys.stderr)
+        return value
+    import getpass
 
+    return getpass.getpass("Anthropic API key (input hidden): ")
+
+
+def cmd_key_test(cfg: config.Config, args: argparse.Namespace) -> int:
+    """Fix 37: one minimal authenticated call; prints ok or the clean error."""
+    from agent_surf import modelapi
+
+    client = make_client(cfg)
+    if client is None:
+        log.error("no Anthropic key: set ANTHROPIC_API_KEY, or on Windows run agent-surf key set")
+        emit(args, {"ok": False, "error": "no key"})
+        return EXIT_ERROR
+    try:
+        modelapi.test_key(client)
+    except modelapi.ModelUnavailable as e:
+        log.error("%s", e)
+        emit(args, {"ok": False, "error": e.kind}, None)
+        return EXIT_ERROR
+    emit(args, {"ok": True}, "ok")
+    return EXIT_OK
+
+
+def cmd_key(cfg: config.Config, args: argparse.Namespace) -> int:
+    """Fix 27. The value is never printed or logged (Fix 37: only its length
+    and what looks wrong with it)."""
+    from agent_surf import credentials, modelapi
+
+    if args.key_command == "test":
+        return cmd_key_test(cfg, args)
     if not credentials.is_windows():
         log.error("the Windows Credential Manager is only available on Windows; here, set "
                   "ANTHROPIC_API_KEY in the environment instead")
         return EXIT_ERROR
     if args.key_command == "set":
-        import getpass
-
-        value = getpass.getpass("Anthropic API key (input hidden): ").strip()
+        raw = read_key(args.visible)
+        value = raw.strip()
         if not value:
             log.error("no key entered; nothing stored")
             return EXIT_ERROR
+        problems = modelapi.key_problems(value)
+        if raw != value:
+            log.info("leading/trailing whitespace removed")
+        if problems:
+            log.warning("the pasted key (%d characters) looks wrong: %s", len(value), "; ".join(problems))
+            if input("store it anyway? [y/N] ").strip().lower() not in ("y", "yes"):
+                log.error("nothing stored; run agent-surf key set again (add --visible to see what you paste)")
+                return EXIT_ERROR
         credentials.write_generic(credentials.ANTHROPIC_TARGET, value)
-        del value
-        log.info("stored in the Windows Credential Manager as %s (Generic, this machine)",
-                 credentials.ANTHROPIC_TARGET)
+        del value, raw
+        log.info("stored in the Windows Credential Manager as %s (Generic, this machine); "
+                 "check it with: agent-surf key test", credentials.ANTHROPIC_TARGET)
         emit(args, {"stored": True, "target": credentials.ANTHROPIC_TARGET})
     else:
         removed = credentials.delete_generic(credentials.ANTHROPIC_TARGET)
@@ -770,10 +817,11 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%s; nothing was saved or submitted", e)
         return EXIT_ERROR
     except Exception as e:
-        from agent_surf import credentials, learner, runner, youtube
+        from agent_surf import credentials, learner, modelapi, runner, youtube
 
         known = (BrowserError, sites.DomainRefused, sites.UnknownSite, sitemap.MapError,
                  runner.NoMap, learner.LearnError, learner.HealFailed, youtube.YouTubeError,
+                 modelapi.ModelUnavailable,   # Fix 37: a bad key, rate limit or no network: one line
                  credentials.CredentialError, ValueError, OSError)  # QueueError/IllegalTransition/ActionMapError are ValueErrors
         if isinstance(e, known):
             log.error("%s", e)

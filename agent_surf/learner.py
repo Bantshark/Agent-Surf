@@ -16,7 +16,7 @@ import re
 import time
 from typing import Any
 
-from agent_surf import challenge, noresults, runner, sitemap, sites
+from agent_surf import challenge, modelapi, noresults, runner, sitemap, sites
 from agent_surf.browser import CapturedResponse, ReadOnlyPage
 from agent_surf.runner import Guard, MapBroken, RunResult
 from agent_surf.store import Store, now_iso
@@ -278,7 +278,8 @@ def learn(store: Store, page: ReadOnlyPage, site: str, page_type: str, *, client
     aria = page.aria_snapshot()
     prompt = build_prompt(site, page_type, url, aria, page.buffer.all(), old_map, broken_reason)
     log.info("asking %s for a %s %s map", model, site, page_type)
-    response = client.messages.create(
+    response = modelapi.call(   # Fix 37: API errors -> ModelUnavailable, one clean line
+        client.messages.create,
         model=model,
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
@@ -327,6 +328,9 @@ def run_with_heal(store: Store, page: ReadOnlyPage, site: str, page_type: str, *
                   old_map=e.map, broken_reason=e.reason, **kw)
         except LearnError as le:
             raise HealFailed(f"map broken ({e.reason}) and relearn failed: {le}") from le
+        except modelapi.ModelUnavailable as me:   # Fix 37: the relearn never ran; not a heal failure
+            raise modelapi.ModelUnavailable(f"map broken ({e.reason}); relearn not attempted: {me}",
+                                            me.kind) from None
     try:
         return runner.run(store, page, site, page_type, **kw)
     except MapBroken as e2:

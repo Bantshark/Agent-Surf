@@ -221,3 +221,23 @@ def test_recover_interrupted_publish(store, site, tmp_path):
     (result,) = publisher.recover_publishing(store, open_page)
     assert result.status == "published" and result.item["receipt"]["post_id"] == "777"
     assert backend.create_calls == 0
+
+
+def test_self_heal_api_error_keeps_item_approved(store, site, tmp_path):
+    """Fix 37: a relearn that cannot reach the model is not attempted against
+    the map: nothing submitted, the item goes back to approved, no new map."""
+    from agent_surf import modelapi
+
+    from test_model_errors import fake_client
+
+    backend, open_page, save_map, add_item = site
+    broken = plain_map()
+    broken["steps"][1]["target"] = {"css": "#gone"}
+    save_map(broken)
+    qid = add_item()
+    with pytest.raises(modelapi.ModelUnavailable, match="401"):
+        publish(store, open_page, qid, client=fake_client(401), model="m", maps_dir=tmp_path / "maps")
+    item = outbox.get(store, qid)
+    assert item["status"] == "approved" and "nothing submitted" in item["last_error"]
+    assert actionmap.current_action_map(store, "composetest", "post")["version"] == 1
+    assert backend.create_calls == 0

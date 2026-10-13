@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from agent_surf import challenge, outbox
+from agent_surf import challenge, modelapi, outbox
 from agent_surf.publisher import PublishRefused
 from agent_surf.store import Store
 
@@ -145,6 +145,10 @@ def tick(store: Store, publish_fn: Callable[[int], object], *, now: datetime,
         except challenge.ChallengeTimeout as e:
             report.not_published.append((item["id"], f"challenge: {e}"))
             notify(alert_text(item, "not published (challenge not cleared)", str(e)))
+            continue
+        except modelapi.ModelUnavailable as e:   # Fix 37: relearn could not ask the model; stays approved
+            report.not_published.append((item["id"], f"model unavailable: {e}"))
+            notify(alert_text(item, "not published (model unavailable, stays approved)", str(e)))
             continue
         except Exception as e:  # one bad item must not stop the dispatcher
             log.exception("publishing queue item %s failed", item["id"])

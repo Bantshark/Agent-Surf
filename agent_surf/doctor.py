@@ -169,8 +169,18 @@ def check_telegram(env: Any = None) -> Check:
     return Check("telegram", WARN, "not configured; dispatch needs it or --stderr-only")
 
 
-def check_anthropic(env: Any = None) -> Check:
+def check_anthropic(env: Any = None, key_client: Callable[[], Any] | None = None) -> Check:
+    """``key_client`` (doctor --check-key, Fix 37) builds a client for one
+    minimal authenticated call; the result names only ok or the error class."""
     key, source = config.anthropic_key_and_source(env)
+    if key and key_client is not None:
+        from agent_surf import modelapi
+
+        try:
+            modelapi.test_key(key_client())
+        except modelapi.ModelUnavailable as e:
+            return Check("anthropic_key", FAIL, f"present via {source} but the API call failed: {e}")
+        return Check("anthropic_key", OK, f"present via {source}; accepted by the API")
     if key:
         return Check("anthropic_key", OK, f"present via {source}")
     return Check("anthropic_key", WARN, "missing (only needed to learn and self-heal): set "
@@ -216,7 +226,8 @@ def run_doctor(cfg: config.Config, store: Store, *, env: Any = None,
                open_session: Callable[[str], Any] | None = None,
                http_get: Callable[[str], Any] | None = None,
                version: Callable[[str], str] | None = None,
-               wait_s: float | None = None, only_sites: list[str] | None = None) -> dict:
+               wait_s: float | None = None, only_sites: list[str] | None = None,
+               key_client: Callable[[], Any] | None = None) -> dict:
     """All checks; ``open_session(endpoint)`` gives a BrowserSession-like
     context manager (default: the real one). Fix 34: the login state of every
     registered site is checked (``only_sites`` limits it), one tab each."""
@@ -245,7 +256,7 @@ def run_doctor(cfg: config.Config, store: Store, *, env: Any = None,
     if not site_names:
         checks.append(Check("sites", WARN, "no maps yet; start with: agent-surf learn <site> <page_type>"))
     checks.append(check_telegram(env))
-    checks.append(check_anthropic(env))
+    checks.append(check_anthropic(env, key_client))
     stats = home_stats(cfg, store)
     queue = queue_counts(store)
     if queue.get("needs_attention"):

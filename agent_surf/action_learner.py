@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agent_surf import actionmap, budget, challenge, learner, noresults, runner, sitemap, sites
+from agent_surf import actionmap, budget, challenge, learner, modelapi, noresults, runner, sitemap, sites
 from agent_surf.browser import BrowserClosed, is_closed_error, page_alive
 from agent_surf.actionmap import (ActionMapError, COMPOSER_CLICK_LABELS, DISCARD_CLICK_LABELS,
                                   SUBMIT_LABELS)
@@ -295,8 +295,8 @@ def learn_action(store: Store, page: ActionPage, site: str, action: str, *, clie
                                + (f"no results ({empty})" if empty else "no composer or controls"))
     prompt = build_action_prompt(site, action, url, aria_before, page.buffer.all(), old_map, broken_reason)
     log.info("asking %s for a %s %s action map", model, site, action)
-    response = client.messages.create(model=model, max_tokens=MAX_TOKENS, system=ACTION_SYSTEM_PROMPT,
-                                      messages=[{"role": "user", "content": prompt}])
+    response = modelapi.call(client.messages.create, model=model, max_tokens=MAX_TOKENS,   # Fix 37
+                             system=ACTION_SYSTEM_PROMPT, messages=[{"role": "user", "content": prompt}])
     try:
         m = learner.parse_model_output(learner.response_text(response))
     except learner.LearnError as e:
