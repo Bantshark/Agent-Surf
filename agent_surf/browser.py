@@ -30,6 +30,29 @@ log = logging.getLogger("agent_surf.browser")
 DEFAULT_BUFFER_SIZE = 500
 
 
+TRANSPORT_NOISE = "socket.send() raised exception."
+
+
+class _TransportNoise(logging.Filter):
+    """Fix 40: asyncio logs this line (as a warning, many times) when
+    Playwright's transport writes to a socket that is already gone, e.g. while
+    a challenge wait polls. It is lowered to DEBUG; every other asyncio record
+    passes untouched."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage() != TRANSPORT_NOISE:
+            return True
+        record.levelno, record.levelname = logging.DEBUG, "DEBUG"
+        return logging.getLogger(record.name).isEnabledFor(logging.DEBUG)
+
+
+def quiet_transport_noise() -> None:
+    """Install the filter on the asyncio logger once."""
+    logger = logging.getLogger("asyncio")
+    if not any(isinstance(f, _TransportNoise) for f in logger.filters):
+        logger.addFilter(_TransportNoise())
+
+
 class BrowserError(RuntimeError):
     pass
 
@@ -548,6 +571,7 @@ class BrowserSession:
         self._tabs: list[Any] = []
 
     def __enter__(self) -> "BrowserSession":
+        quiet_transport_noise()   # Fix 40
         from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
         self._pw = sync_playwright().start()

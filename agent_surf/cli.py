@@ -797,6 +797,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="agent-surf: %(message)s",
                         force=True)
+    from agent_surf.browser import quiet_transport_noise
+
+    quiet_transport_noise()   # Fix 40: Playwright transport noise in asyncio's log
     cfg = config.load()
     try:
         if args.command not in ("chrome", "scrub", "key"):

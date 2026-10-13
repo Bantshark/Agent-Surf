@@ -13,7 +13,9 @@ subtitles in the requested language, else automatic captions) as VTT through
 yt-dlp's own opener and returns plain text with ``subtitles_status``:
 "ok" | "none_available" | "failed: <reason>", so an empty transcript is never
 silent. Video targets never expand a playlist (``noplaylist``); searches and
-playlists stop at ``playlistend``.
+playlists stop at ``playlistend``. Fix 40: transcript text has HTML entities
+decoded and whitespace collapsed; a subtitle fetch answered 429 or 5xx is
+retried after 2 s, then after 6 s, before it is reported as failed.
 
 Deliberately never set: exec / exec_before_download, external downloaders
 (aria2c etc.), the write*link family, netrc_cmd, postprocessors,
@@ -22,8 +24,10 @@ remote_components.
 
 from __future__ import annotations
 
+import html
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -38,6 +42,8 @@ SEARCH_RE = re.compile(r"^ytsearch(\d*):(.+)$", re.S)
 DEFAULT_SUB_LANG = "en"
 MAX_SEARCH = 1000
 MAX_COMMENTS = 100
+SUB_RETRY_DELAYS = (2.0, 6.0)   # Fix 40: waits before each retry of a 429/5xx subtitle fetch
+_sleep = time.sleep
 FORBIDDEN_OPTS = frozenset({
     "exec", "exec_before_download", "external_downloader", "external_downloader_args",
     "writelink", "writeurllink", "writewebloclink", "writedesktoplink", "netrc_cmd",
@@ -136,7 +142,7 @@ def vtt_to_text(vtt: str) -> str:
         if (not line or line == "WEBVTT" or _VTT_TIMING.search(line) or line.isdigit()
                 or line.startswith(("Kind:", "Language:", "NOTE", "STYLE"))):
             continue
-        line = _VTT_TAG.sub("", line).strip()
+        line = " ".join(html.unescape(_VTT_TAG.sub("", line)).split())   # Fix 40: &nbsp; etc.
         if line and (not lines or lines[-1] != line):
             lines.append(line)
     return "\n".join(lines)
@@ -174,16 +180,36 @@ def fetch_subtitles(ydl: Any, info: dict, lang: str = DEFAULT_SUB_LANG) -> dict:
     out.update(subtitles_lang=track_lang, subtitles_kind=kind)
     if urlsplit(url).scheme != "https" or not _is_youtube_host(urlsplit(url).hostname or ""):
         return dict(out, subtitles_status="failed: subtitle track is not on youtube.com")
-    try:
-        with ydl.urlopen(url) as resp:
-            vtt = resp.read().decode("utf-8", "replace")
-    except Exception as e:
-        log.warning("subtitles for %s failed: %s", info.get("id"), type(e).__name__)
-        return dict(out, subtitles_status=f"failed: {type(e).__name__}")
-    text = vtt_to_text(vtt)
+    vtt = None
+    for attempt, delay in enumerate((0.0,) + SUB_RETRY_DELAYS):
+        if delay:
+            _sleep(delay)
+        try:
+            with ydl.urlopen(url) as resp:
+                vtt = resp.read().decode("utf-8", "replace")
+            break
+        except Exception as e:
+            status = _http_status(e)
+            if status is not None and (status == 429 or 500 <= status < 600) and attempt < len(SUB_RETRY_DELAYS):
+                log.info("subtitles for %s: HTTP %s, retrying in %.0f s", info.get("id"), status,
+                         SUB_RETRY_DELAYS[attempt])
+                continue
+            reason = type(e).__name__ + (f" {status}" if status is not None else "")
+            log.warning("subtitles for %s failed: %s", info.get("id"), reason)
+            return dict(out, subtitles_status=f"failed: {reason}")
+    text = vtt_to_text(vtt or "")
     if not text:
         return dict(out, subtitles_status="failed: the track was empty")
     return dict(out, subtitles=text, subtitles_status="ok")
+
+
+def _http_status(e: BaseException) -> int | None:
+    """The HTTP status of a yt-dlp or urllib HTTPError, else None."""
+    for attr in ("status", "code"):
+        value = getattr(e, attr, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
 
 
 def iso_date(value: Any) -> str | None:

@@ -238,3 +238,75 @@ def test_search_flat_and_delta(store):
 
 def test_vtt_to_text():
     assert youtube.vtt_to_text(VTT) == "Hello there\nGeneral synthetic"
+
+
+# Fix 40: entities, retries, transport noise
+
+def test_transcript_entities_and_whitespace():
+    vtt = ("WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nTom&nbsp;&amp;&nbsp;Jerry   &#39;hi&#39;\n\n"
+           "00:00:02.000 --> 00:00:04.000\n<c>a&lt;b</c>\t  end\n")
+    assert youtube.vtt_to_text(vtt) == "Tom & Jerry 'hi'\na<b end"
+
+
+class HTTPError(Exception):
+    def __init__(self, status):
+        super().__init__(f"HTTP Error {status}")
+        self.status = status
+
+
+class Flaky(FakeYDL):
+    """Answers the subtitle URL with the given errors first, then the VTT."""
+    errors: list = []
+
+    def urlopen(self, url):
+        self.fetched.append(url)
+        if Flaky.errors:
+            raise Flaky.errors.pop(0)
+        return FakeResponse(self.vtt.encode())
+
+
+def flaky_fetch(monkeypatch, errors):
+    waits = []
+    monkeypatch.setattr(youtube, "_sleep", waits.append)
+    Flaky.errors = list(errors)
+    info = dict(VIDEO, subtitles=track("en"))
+    (item,) = youtube.fetch("https://youtu.be/vid00000001", subs=True,
+                            ydl_factory=lambda opts: Flaky(opts, info))
+    return item, waits
+
+
+@pytest.mark.parametrize("errors,waits", [([HTTPError(429)], [2.0]), ([HTTPError(503), HTTPError(429)], [2.0, 6.0])])
+def test_subtitle_retry_then_success(monkeypatch, errors, waits):
+    item, slept = flaky_fetch(monkeypatch, errors)
+    assert item["subtitles_status"] == "ok" and "Hello there" in item["subtitles"]
+    assert slept == waits
+
+
+def test_subtitle_retry_then_failed(monkeypatch):
+    item, slept = flaky_fetch(monkeypatch, [HTTPError(429)] * 3)
+    assert item["subtitles_status"] == "failed: HTTPError 429" and slept == [2.0, 6.0]
+
+
+def test_subtitle_404_is_not_retried(monkeypatch):
+    item, slept = flaky_fetch(monkeypatch, [HTTPError(404)])
+    assert item["subtitles_status"] == "failed: HTTPError 404" and slept == []
+
+
+def test_transport_noise_is_debug_only(caplog):
+    import logging
+
+    from agent_surf.browser import TRANSPORT_NOISE, quiet_transport_noise
+
+    quiet_transport_noise()
+    quiet_transport_noise()   # installed once
+    aio = logging.getLogger("asyncio")
+    assert sum(type(f).__name__ == "_TransportNoise" for f in aio.filters) == 1
+    with caplog.at_level(logging.INFO):
+        aio.warning(TRANSPORT_NOISE)
+        aio.warning(TRANSPORT_NOISE)
+        aio.error("Task exception was never retrieved")   # a real error still shows
+    assert [r.getMessage() for r in caplog.records] == ["Task exception was never retrieved"]
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="asyncio"):
+        aio.warning(TRANSPORT_NOISE)
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [("DEBUG", TRANSPORT_NOISE)]
