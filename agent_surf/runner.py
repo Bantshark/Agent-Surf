@@ -3,7 +3,13 @@
 The runner navigates to the templated URL, extracts items (network buffer
 first, DOM as fallback), emits only ids not seen before, and stops on
 ``stop_after_seen`` consecutive already-seen items, ``max_scrolls`` or
-``max_items``. If the first pass finds nothing usable it raises ``MapBroken``;
+``max_items``. Fix 38: when the map extracts a time field (created_at,
+timestamp, time, date) it also stops on ``stop_after_older`` (default 5)
+consecutive items older than the newest item the previous successful run of
+the same page delivered ("older_than_last_run"): an algorithmic feed is
+reshuffled per load, so seen ids alone never stop it. A map marked
+``"ranked": true`` scrolls at most RANKED_MAX_SCROLLS times.
+If the first pass finds nothing usable it raises ``MapBroken``;
 deciding whether to relearn is the caller's job. A login wall is never a
 broken map: it raises challenge.LoggedOut instead (the guard waits for a login
 first). Neither is an empty result page (Fix 29): the site's "no results"
@@ -13,10 +19,12 @@ empty, ends the run with 0 items and stop_reason "no_results".
 
 from __future__ import annotations
 
+import email.utils
 import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from agent_surf import budget, challenge, noresults, sitemap, sites
@@ -35,6 +43,10 @@ FIRST_PASS_TIMEOUT_S = 15.0  # ceiling on waiting for a cold page's feed or item
 FIRST_PASS_POLL_S = 0.5
 FIRST_PASS_QUIET_S = 5.0     # no response of any kind and no DOM change this long: stop waiting
 FIRST_PASS_ATTEMPTS = 2      # first-pass tries (delay_s apart) before MapBroken
+TIME_FIELDS = ("created_at", "timestamp", "time", "date")   # Fix 38, first match wins
+OLDER_STOP = 5               # default scroll.stop_after_older
+RANKED_MAX_SCROLLS = 10      # cap on max_scrolls for "ranked": true maps
+MIN_EPOCH = 946684800        # 2000-01-01: smaller numbers are not times
 
 
 class NoMap(RuntimeError):
@@ -81,6 +93,41 @@ def extract_items(m: dict, source: str, page: ReadOnlyPage, responses: list | No
             responses = page.buffer.all()
         return sitemap.items_from_responses(m[source], _stream(responses, source))
     return page.dom_items(m["dom"])
+
+
+def time_field(m: dict, source: str) -> str | None:
+    fields = m[source]["fields"]
+    return next((f for f in TIME_FIELDS if f in fields), None)
+
+
+def parse_time(value: Any) -> float | None:
+    """Epoch seconds for ISO 8601, RFC 2822, X's "Wed Oct 08 12:00:00 +0000
+    2026", or epoch seconds/milliseconds; None if it is not a time. A time
+    without a zone is taken as UTC."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str) and re.fullmatch(r"\d{9,13}(\.\d+)?", value.strip()):
+        value = float(value)
+    if isinstance(value, (int, float)):
+        v = float(value)
+        v = v / 1000 if v > 1e11 else v
+        return v if v >= MIN_EPOCH else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    s = value.strip()
+    parsers = (lambda t: datetime.fromisoformat(t.replace("Z", "+00:00")),
+               lambda t: datetime.strptime(t, "%a %b %d %H:%M:%S %z %Y"),
+               email.utils.parsedate_to_datetime)
+    for parse in parsers:
+        try:
+            dt = parse(s)
+        except (ValueError, TypeError, IndexError):
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        ts = dt.timestamp()
+        return ts if ts >= MIN_EPOCH else None
+    return None
 
 
 def required_for(m: dict, source: str) -> list[str]:
@@ -260,8 +307,12 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
     guard = guard or (lambda p: None)
     site, page_type = m["site"], m["page_type"]
     max_scrolls = m["scroll"]["max_scrolls"]
+    if m.get("ranked") is True:   # Fix 38: an algorithmic feed never runs out; keep runs short
+        max_scrolls = min(max_scrolls, RANKED_MAX_SCROLLS)
     delay = m["scroll"]["delay_s"]
     stop_after_seen = m["scroll"]["stop_after_seen"]
+    stop_after_older = m["scroll"].get("stop_after_older", OLDER_STOP)
+    high_water = store.high_water(site, page_type, url)   # Fix 38: newest time the last run delivered
     max_items = m["limits"]["max_items"]
     sources = [m["source"]] + [s for s in sitemap.SOURCES if s != m["source"] and s in m]
 
@@ -310,7 +361,9 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
         return extract_items(m, source, page)
 
     run_ids: set[str] = set()
-    consecutive_seen = 0
+    consecutive_seen = consecutive_older = 0
+    newest: float | None = None   # newest time among the items this run delivered
+    tfield: str | None = None
     chosen: str | None = None
     required: list[str] = []
 
@@ -347,6 +400,7 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
                         return result
                 raise MapBroken(broken, m)
             result.source = chosen
+            tfield = time_field(m, chosen)
             row = store.map_row(site, page_type, m["version"]) if "version" in m else None
             problems = health_problems(batch, required, row["dry_run_items"] if row else None)
             result.drift_count, result.rebaselined = track_drift(store, m, result.fingerprint,
@@ -376,9 +430,12 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
                 continue
             run_ids.add(item_id)
             out: dict[str, Any] = {"site": site, "page_type": page_type, "item_id": item_id, **it["fields"]}
+            ts = parse_time(it["fields"].get(tfield)) if tfield else None
             if store.add_new_item(site, page_type, item_id, out):
                 result.items.append(out)
                 consecutive_seen = 0
+                if ts is not None:
+                    newest = ts if newest is None else max(newest, ts)
                 if len(result.items) >= max_items:
                     result.stop_reason = "max_items"
                     break
@@ -386,6 +443,11 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
                 consecutive_seen += 1
                 if consecutive_seen >= stop_after_seen:
                     result.stop_reason = "stop_after_seen"
+                    break
+            if high_water is not None and ts is not None:   # untimed items neither count nor reset
+                consecutive_older = consecutive_older + 1 if ts < high_water else 0
+                if consecutive_older >= stop_after_older:
+                    result.stop_reason = "older_than_last_run"
                     break
         if result.stop_reason:
             break
@@ -399,6 +461,8 @@ def _replay(m: dict, page: ReadOnlyPage, store: Store, url: str, guard: Guard | 
         guard(page)
         page.check_domain()
 
+    if newest is not None:   # a successful run: budget/sleep/closed stops raise before here
+        store.set_high_water(site, page_type, url, newest)
     log.info("%s %s: %d new item(s), stopped on %s after %d scroll(s)",
              site, page_type, len(result.items), result.stop_reason, result.scrolls)
     return result

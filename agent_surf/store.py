@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS items (
     data_json TEXT NOT NULL,
     captured_at TEXT NOT NULL
 );
+-- Fix 38: newest item time (epoch s) delivered by the last successful run of
+-- a page; target is the page URL, so each query or handle has its own mark
+CREATE TABLE IF NOT EXISTS high_water (
+    site TEXT NOT NULL,
+    page_type TEXT NOT NULL,
+    target TEXT NOT NULL,
+    newest REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (site, page_type, target)
+);
 -- Fix 33: custom publication domains added with `sites add-domain`
 CREATE TABLE IF NOT EXISTS site_domains (
     site TEXT NOT NULL,
@@ -202,6 +212,20 @@ class Store:
                 " WHERE site = ? AND page_type = ? AND version = ?",
                 (last_fingerprint, drift_count, healthy_runs, baseline, site, page_type, version),
             )
+
+    def high_water(self, site: str, page_type: str, target: str) -> float | None:
+        row = self.conn.execute("SELECT newest FROM high_water WHERE site = ? AND page_type = ? AND target = ?",
+                                (site, page_type, target)).fetchone()
+        return None if row is None else row["newest"]
+
+    def set_high_water(self, site: str, page_type: str, target: str, newest: float) -> None:
+        """Fix 38: never moves back (a run that only saw older items keeps the mark)."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO high_water (site, page_type, target, newest, updated_at) VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT (site, page_type, target) DO UPDATE SET"
+                " newest = MAX(newest, excluded.newest), updated_at = excluded.updated_at",
+                (site, page_type, target, newest, now_iso()))
 
     def add_site_domain(self, site: str, domain: str) -> bool:
         with self.conn:

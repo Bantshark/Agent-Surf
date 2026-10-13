@@ -298,6 +298,9 @@ def check_url(site: Site | str, url: str) -> None:
 
 for _site in (
     Site("x", ("x.com",), {
+        # Fix 38: no stable URL for the chronological "Following" timeline is
+        # known; x.com/home shows the tab last chosen in that browser (a guess
+        # to confirm locally). Its reshuffled "For you" view is stopped by time.
         "home": "https://x.com/home",
         "search": "https://x.com/search?q={query}&f=live",
         "profile": "https://x.com/{handle}",

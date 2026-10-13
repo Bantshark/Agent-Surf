@@ -17,11 +17,13 @@ from typing import Any, Iterable
 ALLOWED_KEYS = {
     "site", "page_type", "version", "source", "network", "dom", "required_fields",
     "fingerprint", "scroll", "limits", "learned_at", "learned_by", "click", "websocket",
+    "ranked",   # Fix 38: optional; true marks an algorithmic (reshuffled) feed
 }
 REQUIRED_KEYS = {"site", "page_type", "source", "required_fields", "scroll", "limits"}
 NETWORK_KEYS = {"url_regex", "items_path", "id_path", "fields"}
 DOM_KEYS = {"item", "id_attr", "fields"}
 SCROLL_KEYS = {"max_scrolls", "delay_s", "stop_after_seen"}
+SCROLL_OPTIONAL_KEYS = {"stop_after_older"}   # Fix 38
 LIMITS_KEYS = {"max_items"}
 SOURCES = ("network", "dom", "websocket")
 STREAM_SOURCES = ("network", "websocket")  # extracted from captured JSON (responses / WS frames)
@@ -296,7 +298,7 @@ def validate_map(m: Any) -> list[str]:
         if not isinstance(scroll, dict):
             problems.append("scroll: must be an object")
         else:
-            _check_keys(scroll, SCROLL_KEYS, "scroll", problems)
+            _check_keys(scroll, SCROLL_KEYS | SCROLL_OPTIONAL_KEYS, "scroll", problems)
             for k in sorted(SCROLL_KEYS - set(scroll)):
                 problems.append(f"scroll: missing key {k}")
             ms = scroll.get("max_scrolls")
@@ -308,6 +310,11 @@ def validate_map(m: Any) -> list[str]:
             sas = scroll.get("stop_after_seen")
             if "stop_after_seen" in scroll and not (_is_int(sas) and sas >= 1):
                 problems.append("scroll.stop_after_seen: must be an integer >= 1")
+            sao = scroll.get("stop_after_older")
+            if "stop_after_older" in scroll and not (_is_int(sao) and 1 <= sao <= MAX_ITEMS_CEILING):
+                problems.append(f"scroll.stop_after_older: must be an integer 1..{MAX_ITEMS_CEILING}")
+    if "ranked" in m and not isinstance(m["ranked"], bool):
+        problems.append("ranked: must be true or false")
 
     limits = m.get("limits")
     if "limits" in m:

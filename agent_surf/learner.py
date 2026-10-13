@@ -57,7 +57,13 @@ Reply with exactly one JSON object and nothing else, with these keys:
   selector for one item element, "id_attr": attribute on that element holding a
   stable unique id, "fields": {{name: CSS selector inside the item}}}}.
 - "required_fields": field names every real item has (e.g. ["text"]).
-- "scroll": {{"max_scrolls": <= 100, "delay_s": >= 1.0, "stop_after_seen": >= 1}}.
+- "scroll": {{"max_scrolls": <= 100, "delay_s": >= 1.0, "stop_after_seen": >= 1}}
+  (optional "stop_after_older": >= 1, default 5).
+- If items carry a creation time, name that field "created_at" (stops runs once
+  items are older than what the last run delivered).
+- "ranked" (optional): true if the feed is ordered by an algorithm and reshuffled
+  on every load (e.g. a "For you" home timeline), false or absent if it is
+  chronological. Ranked feeds scroll at most 10 times.
 - "limits": {{"max_items": <= 1000}}.
 - "click" (optional): up to 5 CSS selectors for "Show more" / "Load more" style
   buttons that reveal more items or the rest of a truncated item. Only use it if
