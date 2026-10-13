@@ -254,6 +254,47 @@ CHALLENGE_PAGES = {
 }
 
 
+# Fix 36: reCAPTCHA Enterprise anchors that every page of some sites loads, and
+# the frames that only show up when a human has to act.
+def _frame(src, style, wrap=""):
+    f = f'<iframe src="{src}" style="border:0;{style}"></iframe>'
+    return f'<div style="{wrap}">{f}</div>' if wrap else f
+
+
+ANCHOR = "https://www.google.com/recaptcha/enterprise/anchor?ar=1&amp;k=synthetic"
+BFRAME = "https://www.google.com/recaptcha/enterprise/bframe?hl=en&amp;k=synthetic"
+CHALLENGE_PAGES.update({
+    "/recaptcha/zero": page("Feed Test", "<main><h1>Feed</h1></main>"
+                            + _frame(ANCHOR + "&amp;size=invisible", "width:0;height:0")),
+    "/recaptcha/hidden": page("Feed Test", "<main><h1>Feed</h1></main>"
+                              + _frame(ANCHOR + "&amp;size=invisible", "width:256px;height:60px",
+                                       "visibility:hidden")),
+    "/recaptcha/offscreen": page("Feed Test", "<main><h1>Feed</h1></main>" + _frame(
+        ANCHOR, "position:absolute;left:-10000px;top:0;width:304px;height:78px")),
+    "/recaptcha/badge": page("Feed Test", "<main><h1>Feed</h1></main>" + _frame(
+        ANCHOR + "&amp;size=invisible", "position:fixed;right:0;bottom:14px;width:256px;height:60px")),
+    "/recaptcha/checkbox": page("Feed Test", "<main><h1>Feed</h1></main>"
+                                + _frame(ANCHOR + "&amp;size=normal", "width:304px;height:78px")),
+    "/recaptcha/bframe": page("Feed Test", "<main><h1>Feed</h1></main>"
+                              + _frame(BFRAME, "width:400px;height:580px")),
+    "/recaptcha/bframe-hidden": page("Feed Test", "<main><h1>Feed</h1></main>" + _frame(
+        BFRAME, "width:400px;height:580px", "visibility:hidden;position:absolute;top:-10000px")),
+    "/turnstile/widget": page("Feed Test", "<main><h1>Feed</h1></main>" + _frame(
+        "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0",
+        "width:300px;height:65px")),
+    # The image challenge opens 1 s in (as after a suspicious action) and is
+    # solved by the human 3 s in.
+    "/recaptcha/late": page("Feed Test", "<main><h1>Feed</h1></main>"
+                            + _frame(ANCHOR + "&amp;size=invisible", "width:256px;height:60px",
+                                     "visibility:hidden")
+                            + '<div id="c" style="visibility:hidden">'
+                            + _frame(BFRAME, "width:400px;height:580px") + "</div>"
+                            + "<script>const c = document.getElementById('c');"
+                              "setTimeout(() => c.style.visibility = 'visible', 1000);"
+                              "setTimeout(() => c.style.visibility = 'hidden', 3000);</script>"),
+})
+
+
 def drift_page(posts, sidebar, *, landmarks=True):
     """Synthetic feed page. ``posts``: list of (id, text or None)."""
     arts = "".join(

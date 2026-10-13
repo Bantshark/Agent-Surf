@@ -296,6 +296,25 @@ def safe_to_click(c: dict) -> bool:
     return any(CLICK_ALLOW.search(n) for n in names)
 
 
+# Fix 36: one iframe element -> {url, visible, width, height}. Visible means
+# rendered (display, visibility, opacity of it and its ancestors), non-empty,
+# and not pushed off the document to the top or left.
+_FRAME_INFO_JS = r"""el => {
+  const r = el.getBoundingClientRect();
+  const win = el.ownerDocument.defaultView;
+  let visible = r.width > 0 && r.height > 0;
+  if (visible && el.checkVisibility) {
+    visible = el.checkVisibility({opacityProperty: true, visibilityProperty: true});
+  }
+  for (let a = el; visible && a && a.nodeType === 1; a = a.parentElement) {
+    const s = win.getComputedStyle(a);
+    if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0) visible = false;
+  }
+  if (r.right + win.scrollX <= 0 || r.bottom + win.scrollY <= 0) visible = false;
+  return {url: el.src || '', visible: !!visible, width: r.width, height: r.height};
+}"""
+
+
 class ReadOnlyPage:
     def __init__(self, page: Any, site: sites.Site, buffer: ResponseBuffer | None = None):
         self._page = page
@@ -392,6 +411,35 @@ class ReadOnlyPage:
         except Exception as e:
             self._closed(e)
         return urls
+
+    def frame_infos(self) -> list[dict]:
+        """Fix 36: captcha-looking frames with visibility and size, for the
+        challenge check: every loaded frame (via its iframe element, so nested
+        ones too) plus every iframe element of the page (even unloaded)."""
+        from agent_surf.challenge import IFRAME_MARKERS
+
+        def wanted(url: str) -> bool:
+            low = (url or "").lower()
+            return any(m in low for m in IFRAME_MARKERS)
+
+        infos: list[dict] = []
+        try:
+            for f in self._page.frames:
+                if f is self._page.main_frame or not wanted(f.url):
+                    continue
+                try:
+                    el = f.frame_element()
+                    info = el.evaluate(_FRAME_INFO_JS)
+                except Exception as e:
+                    self._closed(e)
+                    continue   # detached while we looked: the DOM scan below still sees its element
+                info["url"] = f.url
+                infos.append(info)
+            infos += [i for i in self._page.evaluate(
+                f"() => Array.from(document.querySelectorAll('iframe'), {_FRAME_INFO_JS})") if wanted(i["url"])]
+        except Exception as e:
+            self._closed(e)
+        return infos
 
     def aria_snapshot(self) -> str:
         try:

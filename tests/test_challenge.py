@@ -137,3 +137,84 @@ def test_without_telegram_prints_to_stderr(capsys):
 
     challenge.make_notifier({}, urlopen=urlopen)("challenge detected")
     assert "challenge detected" in capsys.readouterr().err
+
+
+# Fix 36: invisible reCAPTCHA anchors are not challenges; visible challenge
+# frames are. Decision: the visible reCAPTCHA checkbox ("I'm not a robot",
+# 304x78) needs a human click, so it IS a challenge even though it is smaller
+# than MIN_CHALLENGE_FRAME_PX; the invisible badge (size=invisible) is not.
+@pytest.mark.parametrize("path,expected", [
+    ("/recaptcha/zero", None),             # LinkedIn: 0x0 enterprise anchor
+    ("/recaptcha/hidden", None),           # Reddit: 256x60 anchor, hidden
+    ("/recaptcha/offscreen", None),        # pushed off the page
+    ("/recaptcha/badge", None),            # visible invisible-reCAPTCHA badge
+    ("/recaptcha/bframe-hidden", None),    # preloaded image challenge, hidden
+    ("/recaptcha/checkbox", "reCAPTCHA checkbox (304x78)"),
+    ("/recaptcha/bframe", "recaptcha challenge frame (400x580)"),
+    ("/turnstile/widget", "challenges.cloudflare.com challenge frame (300x65)"),
+    ("/recaptcha", "visible recaptcha iframe (304x154)"),   # a large captcha frame (300x150 + border)
+])
+def test_visibility_and_size_decide(har_page, path, expected):
+    page = har_page("challenges.har")
+    page.goto("https://feed.test" + path)
+    reason = challenge.detect_page(page)
+    if expected is None:
+        assert reason is None, reason
+    else:
+        assert reason and expected in reason
+    # the URL-only rule would have flagged every one of them
+    assert detect(page.url, page.title(), page.frame_urls())
+
+
+def test_frame_reason_pure():
+    from agent_surf.challenge import MIN_CHALLENGE_FRAME_PX as N, FrameInfo, frame_reason
+
+    anchor = "https://www.google.com/recaptcha/enterprise/anchor?ar=1&k=x"
+    assert frame_reason(FrameInfo(anchor, False, 304, 78)) is None
+    assert frame_reason(FrameInfo(anchor, True, 0, 0)) is None
+    assert frame_reason(FrameInfo(anchor + "&size=invisible", True, 256, 60)) is None
+    assert frame_reason(FrameInfo(anchor + "&size=invisible", True, N, N))    # big enough anyway
+    assert frame_reason(FrameInfo(anchor, True, 304, 78))                     # the checkbox
+    assert frame_reason(FrameInfo("https://www.google.com/recaptcha/api2/bframe?k=x", True, 1, 1))
+    assert frame_reason(FrameInfo("https://www.google.com/recaptcha/api2/bframe?k=x", False, 400, 580)) is None
+    assert frame_reason(FrameInfo("https://x.test/embed", True, 800, 800)) is None
+    assert challenge.detect_frames("https://x.test/checkpoint", "", []) == "URL path contains /checkpoint"
+
+
+def test_challenge_that_appears_later_is_caught(har_page):
+    page = har_page("challenges.har")
+    page.goto("https://feed.test/recaptcha/late")
+    assert challenge.detect_page(page) is None       # only the hidden anchor at first
+    page.wait(1.5)
+    sent = []
+    challenge.wait_until_clear(page, notify=sent.append, poll_s=0.5, timeout_s=20)
+    assert len(sent) == 1 and "challenge frame" in sent[0]   # the image challenge opened
+    assert challenge.detect_page(page) is None       # and the wait ended once it was hidden again
+
+
+class FlippingFrames(FakePage):
+    """The frame list is re-read on every poll: visible, visible, then hidden."""
+
+    def __init__(self, states):
+        super().__init__(["https://feed.test/"])
+        self.states = list(states)
+
+    def frame_infos(self):
+        return [{"url": "https://www.google.com/recaptcha/api2/bframe?k=x", "visible": self.states[0],
+                 "width": 400, "height": 580}]
+
+    def advance(self, _seconds):
+        if len(self.states) > 1:
+            self.states.pop(0)
+
+
+def test_wait_loop_rechecks_visibility():
+    page = FlippingFrames([True, True, False])
+    sent, sleeps = [], []
+
+    def sleep(s):
+        sleeps.append(s)
+        page.advance(s)
+
+    challenge.wait_until_clear(page, notify=sent.append, sleep=sleep)
+    assert len(sent) == 1 and sleeps == [5.0, 5.0]

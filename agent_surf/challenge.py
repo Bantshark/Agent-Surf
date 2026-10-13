@@ -19,6 +19,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from agent_surf import config, sites
@@ -30,6 +31,28 @@ TIMEOUT_S = 600.0
 PATH_RE = re.compile(r"/(challenge|checkpoint|captcha)", re.I)
 TITLE_MARKER = "just a moment"
 IFRAME_MARKERS = ("challenges.cloudflare.com", "recaptcha", "hcaptcha")
+# Fix 36: sites load invisible reCAPTCHA (Enterprise) anchors on every page
+# (Reddit 256x60 hidden, LinkedIn 0x0). A captcha iframe is a challenge only if
+# its element is visible and at least this big in both directions ...
+MIN_CHALLENGE_FRAME_PX = 100
+# ... or if it is a frame that only ever shows a challenge (the reCAPTCHA image
+# challenge "bframe", hCaptcha, Cloudflare) and is visible at any size ...
+CHALLENGE_ONLY_FRAME_RE = re.compile(r"/recaptcha/.*bframe|hcaptcha|challenges\.cloudflare\.com", re.I)
+# ... or if it is the visible reCAPTCHA checkbox ("I'm not a robot", 304x78, or
+# 164x144 compact): it needs a human click, so it is treated as a challenge.
+# The invisible badge (256x60, size=invisible) is not.
+RECAPTCHA_ANCHOR_RE = re.compile(r"/recaptcha/.*anchor", re.I)
+CHECKBOX_MIN_W, CHECKBOX_MIN_H = 150, 70
+
+
+@dataclass(frozen=True)
+class FrameInfo:
+    """A frame as the challenge check sees it: its URL, whether its element is
+    visible (CSS, opacity, on-screen) and its size in CSS px."""
+    url: str
+    visible: bool = True
+    width: float = 0.0
+    height: float = 0.0
 TELEGRAM_API = "https://api.telegram.org"
 
 
@@ -115,8 +138,7 @@ def ensure_logged_in(page: Any) -> None:
         raise LoggedOut(_site_name(page), reason)
 
 
-def detect(url: str, title: str, frame_urls: list[str]) -> str | None:
-    """Return a reason string if the page looks like a challenge, else None."""
+def _page_reason(url: str, title: str) -> str | None:
     try:
         path = urllib.parse.urlsplit(url or "").path
     except ValueError:
@@ -126,17 +148,63 @@ def detect(url: str, title: str, frame_urls: list[str]) -> str | None:
         return f"URL path contains {m.group(0)}"
     if TITLE_MARKER in (title or "").lower():
         return "page title is 'Just a moment'"
+    return None
+
+
+def _marker(frame_url: str) -> str | None:
+    low = (frame_url or "").lower()
+    return next((m for m in IFRAME_MARKERS if m in low), None)
+
+
+def detect(url: str, title: str, frame_urls: list[str]) -> str | None:
+    """Return a reason string if the page looks like a challenge, else None.
+    URL-only frame rule (every captcha frame counts); kept for tests and for
+    pages that cannot report frame visibility. Callers use detect_frames."""
+    reason = _page_reason(url, title)
+    if reason:
+        return reason
     for frame in frame_urls:
-        low = (frame or "").lower()
-        for marker in IFRAME_MARKERS:
-            if marker in low:
-                return f"{marker} iframe on page"
+        marker = _marker(frame)
+        if marker:
+            return f"{marker} iframe on page"
+    return None
+
+
+def frame_reason(frame: FrameInfo) -> str | None:
+    """Fix 36: why this frame is a challenge, or None. Invisible, zero-size and
+    off-screen frames never are."""
+    marker = _marker(frame.url)
+    if not marker or not frame.visible or frame.width <= 0 or frame.height <= 0:
+        return None
+    size = f"{int(frame.width)}x{int(frame.height)}"
+    if CHALLENGE_ONLY_FRAME_RE.search(frame.url):
+        return f"visible {marker} challenge frame ({size})"
+    if frame.width >= MIN_CHALLENGE_FRAME_PX and frame.height >= MIN_CHALLENGE_FRAME_PX:
+        return f"visible {marker} iframe ({size})"
+    if (RECAPTCHA_ANCHOR_RE.search(frame.url) and "size=invisible" not in frame.url.lower()
+            and frame.width >= CHECKBOX_MIN_W and frame.height >= CHECKBOX_MIN_H):
+        return f"visible reCAPTCHA checkbox ({size})"
+    return None
+
+
+def detect_frames(url: str, title: str, frames: list[FrameInfo]) -> str | None:
+    """Fix 36: like detect, but a captcha frame counts only per frame_reason."""
+    reason = _page_reason(url, title)
+    if reason:
+        return reason
+    for frame in frames:
+        reason = frame_reason(frame)
+        if reason:
+            return reason
     return None
 
 
 def detect_page(page: Any) -> str | None:
     if logged_out_page(page):  # e.g. LinkedIn's /checkpoint/lg is a login page
         return None
+    if hasattr(page, "frame_infos"):   # re-read on every call: visibility can change
+        frames = [FrameInfo(**f) if isinstance(f, dict) else f for f in page.frame_infos()]
+        return detect_frames(page.url, page.title(), frames)
     return detect(page.url, page.title(), page.frame_urls())
 
 
