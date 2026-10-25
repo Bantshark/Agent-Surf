@@ -15,9 +15,9 @@ from agent_surf.store import Store
 NOW = datetime(2026, 10, 10, tzinfo=timezone.utc)
 
 
-def add_item(store, item_id, days_ago):
+def add_item(store, item_id, days_ago, now=NOW):
     store.conn.execute("INSERT INTO items (site, page_type, item_id, data_json, captured_at) VALUES ('x', 'search', ?, '{}', ?)",
-                       (item_id, (NOW - timedelta(days=days_ago)).isoformat(timespec="seconds")))
+                       (item_id, (now - timedelta(days=days_ago)).isoformat(timespec="seconds")))
     store.mark_seen("x", "search", item_id)
 
 
@@ -34,11 +34,11 @@ def test_purge_items_threshold_and_dry_run(store):
     assert len(outbox.list_items(store)) == 1 and store.current_map("x", "search") is not None
 
 
-def make_debug(root, n, age_days):
+def make_debug(root, n, age_days, now=NOW):
     p = root / f"2026-{n:03d}-x-post"
     p.mkdir(parents=True)
     (p / "error.txt").write_text("e")
-    t = (NOW - timedelta(days=age_days)).timestamp()
+    t = (now - timedelta(days=age_days)).timestamp()
     os.utime(p, (t, t))
     return p
 
@@ -62,11 +62,12 @@ def test_cli_purge_and_auto_prune(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     monkeypatch.setenv("AGENT_SURF_HOME", str(home))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    now = datetime.now(timezone.utc)   # the CLI ages things by the real clock, not NOW
     with Store(home / "surf.db") as s:
-        add_item(s, "old", 200)
-        add_item(s, "new", 1)
+        add_item(s, "old", 200, now)
+        add_item(s, "new", 1, now)
     for i in range(25):
-        make_debug(home / "debug", i, 1 + i * 0.01)
+        make_debug(home / "debug", i, 1 + i * 0.01, now)
     assert cli.main(["purge", "--dry-run", "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["dry_run"] is True and out["items"] >= 1 and out["debug_folders"] == []

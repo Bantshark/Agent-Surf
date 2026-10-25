@@ -33,4 +33,5 @@ def test_secrets_not_on_config():
     assert config.anthropic_api_key(env) == "sk-test-not-real"
     assert config.telegram_credentials(env) == ("t", "c")
     assert config.telegram_credentials({"TELEGRAM_BOT_TOKEN": "t"}) is None
-    assert config.anthropic_api_key({}) is None
+    found = config.anthropic_api_key({}) is not None   # a bool, so a failure never prints a key
+    assert not found

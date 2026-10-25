@@ -87,8 +87,22 @@ def isolated_logging():
 @pytest.fixture(autouse=True)
 def no_credential_manager(monkeypatch):
     """Tests never read a real Windows Credential Manager entry (Fix 27);
-    test_credentials.py turns this off with a fake advapi32."""
+    test_credentials.py turns this off with a fake advapi32.
+
+    The env var alone is not enough: a test that passes an explicit env
+    mapping such as {} hides it from the lookup, which then read the real key
+    (and a failing assert printed it). So the lookup itself is guarded too."""
+    from agent_surf import credentials
+
     monkeypatch.setenv("AGENT_SURF_NO_CREDMAN", "1")
+    real = credentials.anthropic_from_credman
+
+    def guarded(*args, **kwargs):
+        if os.environ.get("AGENT_SURF_NO_CREDMAN") == "1":
+            return None
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(credentials, "anthropic_from_credman", guarded)
 
 
 @pytest.fixture(autouse=True)

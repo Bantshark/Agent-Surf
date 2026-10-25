@@ -72,9 +72,17 @@ def chrome_port_zero(tmp_path):
     proc.wait(timeout=10)
 
 
+BROWSER_PAGES = ("chrome:", "edge:", "brave:", "devtools:", "chrome-extension:", "chrome-untrusted:")
+
+
+def web_pages(pages):
+    """Tabs other than the browser's own (Edge opens edge://sync-confirmation-dialog/ by itself)."""
+    return [p for p in pages if not p.url.startswith(BROWSER_PAGES)]
+
+
 def tab_urls(endpoint):
     with BrowserSession(endpoint) as s:
-        return [p.url for p in s.context.pages]
+        return [p.url for p in web_pages(s.context.pages)]
 
 
 def test_devtools_mode_attaches_and_leaves_user_tabs_alone(chrome_port_zero):
@@ -89,6 +97,6 @@ def test_devtools_mode_attaches_and_leaves_user_tabs_alone(chrome_port_zero):
         page = s.new_page(site)
         raw = s.open_tab()
         raw.set_content("<p>agent surf tab</p>")
-        assert len(s.context.pages) == len(before) + 2
+        assert len(web_pages(s.context.pages)) == len(before) + 2
         assert page.url == "about:blank"
     assert tab_urls(endpoint) == before  # ours closed, the user's untouched

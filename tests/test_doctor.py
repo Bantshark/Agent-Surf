@@ -201,7 +201,8 @@ def test_counts_and_presence_checks(tmp_path, har_page, markers):
 
 
 def test_anthropic_key_sources(monkeypatch):
-    assert doctor.check_anthropic({}).detail.startswith("missing")
+    missing = doctor.check_anthropic({}).detail.startswith("missing")   # a bool, so a failure never prints a key
+    assert missing
     monkeypatch.setattr(config, "anthropic_key_and_source", lambda env=None: (KEY, "credential manager"))
     assert doctor.check_anthropic({}).detail == "present via credential manager"
 
